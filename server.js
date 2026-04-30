@@ -164,10 +164,10 @@ app.post('/parse', async (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 // Запуск
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`ezhome-parser запущен на порту ${PORT}`);
   // Прогреваем браузер заранее
-  await getBrowser();
+
 });
 
 process.on('exit', async () => {
