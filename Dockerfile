@@ -1,17 +1,8 @@
 FROM node:18-slim
-
-RUN apt-get update && apt-get install -y \
-    chromium \
-    --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
-
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-ENV PLAYWRIGHT_BROWSERS_PATH=0
-
+RUN apt-get update && apt-get install -y wget gnupg ca-certificates --no-install-recommends && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json ./
-RUN npm install
+RUN npm install && npx playwright install chromium --with-deps
 COPY . .
-
 EXPOSE 3000
 CMD ["node", "server.js"]
