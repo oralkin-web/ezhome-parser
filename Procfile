@@ -1,1 +1,1 @@
-web: npx playwright install chromium && node server.js
+web: node server.js
