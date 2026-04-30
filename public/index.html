@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ezhome · Тест парсера</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f1ef;min-height:100vh;padding:32px 24px}
+.card{background:#fff;border-radius:8px;padding:28px 32px;max-width:680px;margin:0 auto;box-shadow:0 1px 4px rgba(0,0,0,0.08)}
+h1{font-size:17px;font-weight:500;color:#7B2237;margin-bottom:4px}
+.sub{font-size:12px;color:#8e8e93;margin-bottom:24px}
+.row{display:flex;gap:8px;margin-bottom:16px}
+input[type=url]{flex:1;border:1px solid #ddd5d0;border-radius:4px;padding:9px 12px;font-size:13px;font-family:inherit;outline:none;color:#000}
+input[type=url]:focus{border-color:#7B2237}
+.btn{background:#7B2237;color:#fff;border:none;border-radius:4px;padding:9px 20px;font-size:13px;cursor:pointer;white-space:nowrap;font-family:inherit}
+.btn:disabled{opacity:0.5;cursor:default}
+.status{font-size:12px;padding:8px 12px;border-radius:4px;margin-bottom:16px;display:none}
+.status.show{display:block}
+.status.loading{background:#f0ede9;color:#8e8e93}
+.status.ok{background:#e8f0ec;color:#3B6D11}
+.status.err{background:#fdeaec;color:#A32D2D}
+.result{display:none;margin-top:4px}
+.result.show{display:block}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:10px;color:#8e8e93;text-transform:uppercase;letter-spacing:0.5px}
+.field input{border:1px solid #ddd5d0;border-radius:4px;padding:7px 10px;font-size:13px;font-family:inherit;color:#000;background:#fdfcfb}
+.field.full{grid-column:1/-1}
+.photo-wrap{display:flex;align-items:flex-start;gap:12px;padding:12px;background:#f5f1ef;border-radius:4px;margin-bottom:16px}
+.photo-wrap img{width:80px;height:80px;object-fit:contain;border-radius:4px;background:#fff;border:1px solid #ddd5d0;flex-shrink:0}
+.photo-info{font-size:12px;color:#8e8e93;line-height:1.6}
+.photo-url{font-size:10px;color:#778D7F;word-break:break-all;margin-top:4px}
+.time{font-size:11px;color:#8e8e93;text-align:right;margin-top:8px}
+.examples{margin-bottom:20px}
+.examples p{font-size:11px;color:#8e8e93;margin-bottom:6px}
+.example{display:inline-block;font-size:11px;color:#778D7F;cursor:pointer;text-decoration:underline;text-underline-offset:2px;margin-right:12px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>ezhome · Тест парсера товаров</h1>
+  <p class="sub">Playwright агент — открывает реальный браузер и вытаскивает все данные</p>
+
+  <div class="examples">
+    <p>Примеры ссылок:</p>
+    <span class="example" onclick="setUrl('https://www.inmyroom.ru/products/1986653-divan-stoun-sero-bezhevogo-cveta')">inmyroom.ru</span>
+    <span class="example" onclick="setUrl('https://idealbeds.ru/catalog/divany/divan-reid/')">idealbeds.ru</span>
+    <span class="example" onclick="setUrl('https://www.divan.ru/product/divan-misl-barhat-stone?upholstery=25138-7-1')">divan.ru</span>
+  </div>
+
+  <div class="row">
+    <input type="url" id="url" placeholder="Вставьте ссылку на товар...">
+    <button class="btn" id="btn" onclick="parse()">↓ Загрузить</button>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <div class="result" id="result">
+    <div class="photo-wrap" id="photo-wrap" style="display:none">
+      <img id="photo" src="" alt="">
+      <div>
+        <div class="photo-info" id="photo-info"></div>
+        <div class="photo-url" id="photo-url"></div>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="field full"><label>Название</label><input id="r-name" readonly></div>
+      <div class="field"><label>Цена, ₽</label><input id="r-price" readonly></div>
+      <div class="field"><label>Размер</label><input id="r-size" readonly></div>
+      <div class="field full"><label>Цвет / материал</label><input id="r-color" readonly></div>
+    </div>
+    <div class="time" id="r-time"></div>
+  </div>
+</div>
+
+<script>
+function setUrl(u) { document.getElementById('url').value = u; }
+
+function show(msg, type) {
+  const el = document.getElementById('status');
+  el.textContent = msg; el.className = 'status show ' + type;
+}
+
+async function parse() {
+  const url = document.getElementById('url').value.trim();
+  if (!url) return show('Вставьте ссылку', 'err');
+
+  const btn = document.getElementById('btn');
+  btn.disabled = true; btn.textContent = '…';
+  show('Открываю страницу товара...', 'loading');
+  document.getElementById('result').classList.remove('show');
+  document.getElementById('photo-wrap').style.display = 'none';
+
+  try {
+    const resp = await fetch('/parse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const data = await resp.json();
+
+    if (!data.ok) throw new Error(data.error);
+
+    document.getElementById('r-name').value = data.name || '—';
+    document.getElementById('r-price').value = data.price ? data.price.toLocaleString('ru') + ' ₽' : '—';
+    document.getElementById('r-size').value = data.size || '—';
+    document.getElementById('r-color').value = data.color || '—';
+    document.getElementById('r-time').textContent = `Время парсинга: ${data.time_ms} мс`;
+
+    if (data.image_url) {
+      const wrap = document.getElementById('photo-wrap');
+      const img = document.getElementById('photo');
+      wrap.style.display = 'flex';
+      img.src = data.image_url;
+      document.getElementById('photo-url').textContent = data.image_url;
+      img.onload = () => document.getElementById('photo-info').textContent = '✓ Фото загрузилось';
+      img.onerror = () => document.getElementById('photo-info').textContent = '✗ Фото не загрузилось (CORS)';
+    }
+
+    document.getElementById('result').classList.add('show');
+    show(`✓ Готово за ${data.time_ms} мс`, 'ok');
+  } catch(e) {
+    show('Ошибка: ' + e.message, 'err');
+  }
+
+  btn.disabled = false; btn.textContent = '↓ Загрузить';
+}
+
+document.getElementById('url').addEventListener('keydown', e => { if (e.key === 'Enter') parse(); });
+</script>
+</body>
+</html>
