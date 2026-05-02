@@ -10,6 +10,6 @@
   },
   "dependencies": {
     "express": "^4.18.2",
-    "playwright-core": "^1.44.0"
+    "puppeteer-core": "^22.0.0"
   }
 }

@@ -1,5 +1,5 @@
 const express = require('express');
-const { chromium } = require('playwright-core');
+const puppeteer = require('puppeteer-core');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,7 +13,7 @@ let browserInstance = null;
 async function getBrowser() {
   if (!browserInstance) {
     console.log('Запускаю браузер...');
-    browserInstance = await chromium.launch({
+    browserInstance = await puppeteer.launch({
       executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
       headless: true,
       
