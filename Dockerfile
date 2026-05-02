@@ -1,8 +1,12 @@
-FROM node:18-slim
-RUN apt-get update && apt-get install -y wget gnupg ca-certificates --no-install-recommends && rm -rf /var/lib/apt/lists/*
+FROM mcr.microsoft.com/playwright:v1.44.0-jammy
+
 WORKDIR /app
+
 COPY package.json ./
-RUN npm install && npx playwright install chromium --with-deps
+RUN npm install
+
 COPY . .
+
 EXPOSE 3000
+
 CMD ["node", "server.js"]
