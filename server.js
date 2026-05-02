@@ -14,6 +14,7 @@ async function getBrowser() {
   if (!browserInstance) {
     console.log('Запускаю браузер...');
     browserInstance = await chromium.launch({
+      executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
       headless: true,
       
       args: [
