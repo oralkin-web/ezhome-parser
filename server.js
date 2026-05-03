@@ -28,14 +28,17 @@ async function parsePage(url) {
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     });
 
-    // networkidle ждёт пока все редиректы и JS загрузятся
+    // Ждём полной загрузки включая редиректы
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    
+    // Ждём пока навигация полностью завершится
     try {
-      await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.waitForLoadState('networkidle', { timeout: 10000 });
     } catch (e) {
-      // Если networkidle timeout — всё равно парсим что есть
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(3000);
+      // networkidle timeout — ок, продолжаем
     }
+
+    await page.waitForTimeout(2000);
 
     const result = await page.evaluate(() => {
       const bodyText = document.body.innerText;
@@ -46,10 +49,10 @@ async function parsePage(url) {
         document.querySelector('[class*="product-title"], [class*="product__title"], [class*="goods-title"]')?.innerText?.trim() ||
         document.title.split(/[–—|·]/)[0].trim();
 
-      // Цена — рубли, евро, доллары
+      // Цена — рубли, евро (разные форматы), доллары
       let price = null;
 
-      // Рубли
+      // Рубли: 12 990 ₽ или 12990руб
       const priceElRub = [...document.querySelectorAll('*')]
         .find(el =>
           el.children.length === 0 &&
@@ -64,10 +67,10 @@ async function parsePage(url) {
         if (m) price = parseInt(m[1].replace(/\s/g, ''));
       }
 
-      // Евро
+      // Евро: 399,00 € или € 399 или 399.00€
       if (!price) {
-        const m = bodyText.match(/€\s*([\d.,]+)/);
-        if (m) price = parseFloat(m[1].replace(',', '.'));
+        const m = bodyText.match(/([\d.,]+)\s*€/) || bodyText.match(/€\s*([\d.,]+)/);
+        if (m) price = parseFloat(m[1].replace(/\./g, '').replace(',', '.'));
       }
 
       // Доллары
@@ -84,7 +87,7 @@ async function parsePage(url) {
         /(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*см/i,
         /(\d{2,3})\s*[xхх×]\s*(\d{2,3})/i,
         /диаметр\s*(\d+[\d,.]*)\s*см/i,
-        /ø\s*(\d+[\d,.]*)\s*см/i,
+        /ø\s*(\d+[\d,.]*)/i,
         /(\d{2,3})\s*см/i,
       ];
       for (const p of sizePatterns) {
@@ -100,16 +103,16 @@ async function parsePage(url) {
       // Цвет/материал
       let color = null;
       const colorPatterns = [
-        /(?:цвет|обивка|покрытие)[:\s]+([^\n,\.;]{3,60})/i,
-        /(?:материал|ткань|корпус)[:\s]+([^\n,\.;]{3,60})/i,
-        /(?:велюр|бархат|кожа|рогожка|шенилл|флок|текстиль|букле|металл|дерево|пластик)[^\n,\.;]{0,50}/i,
+        /(?:цвет|обивка|покрытие|colour|color)[:\s]+([^\n,\.;]{3,60})/i,
+        /(?:материал|ткань|корпус|material)[:\s]+([^\n,\.;]{3,60})/i,
+        /(?:велюр|бархат|кожа|рогожка|шенилл|флок|текстиль|букле|металл|дерево|пластик|white|black|grey|beige)[^\n,\.;]{0,50}/i,
       ];
       for (const p of colorPatterns) {
         const m = bodyText.match(p);
         if (m) { color = (m[1] || m[0]).trim().slice(0, 80); break; }
       }
 
-      // Фото — og:image первым делом
+      // Фото
       let image_url =
         document.querySelector('meta[property="og:image"]')?.content ||
         document.querySelector('meta[name="og:image"]')?.content ||
