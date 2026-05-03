@@ -1,5 +1,6 @@
 const express = require('express');
-const puppeteer = require('puppeteer-core');
+const { chromium } = require('playwright-core');
+const Browserbase = require('@browserbasehq/sdk');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -7,44 +8,28 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.static('public'));
 
-// Один браузер на всё приложение
-let browserInstance = null;
+const bb = new Browserbase({
+  apiKey: process.env.BROWSERBASE_API_KEY,
+});
 
-async function getBrowser() {
-  if (!browserInstance) {
-    console.log('Запускаю браузер...');
-    browserInstance = await puppeteer.launch({
-      executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
-      headless: true,
-      
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu'
-      ]
-    });
-    console.log('Браузер запущен');
-  }
-  return browserInstance;
-}
-
-// Парсим страницу товара
+// Парсим страницу товара через Browserbase
 async function parsePage(url) {
-  const browser = await getBrowser();
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 800 },
-    extraHTTPHeaders: {
+  let session;
+  try {
+    session = await bb.sessions.create({
+      projectId: process.env.BROWSERBASE_PROJECT_ID,
+    });
+
+    const browser = await chromium.connectOverCDP(session.connectUrl);
+    const context = browser.contexts()[0];
+    const page = context.pages()[0];
+
+    await page.setExtraHTTPHeaders({
       'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-    }
-  });
+    });
 
-  const page = await context.newPage();
-
-  try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(3000);
 
     const result = await page.evaluate(() => {
@@ -140,11 +125,12 @@ async function parsePage(url) {
       return { name, price, size, color, image_url };
     });
 
+    await browser.close();
     return { ok: true, ...result, url };
+
   } catch (e) {
+    console.error('Ошибка парсинга:', e.message);
     return { ok: false, error: e.message, url };
-  } finally {
-    await context.close();
   }
 }
 
@@ -167,10 +153,4 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 // Запуск
 app.listen(PORT, () => {
   console.log(`ezhome-parser запущен на порту ${PORT}`);
-  // Прогреваем браузер заранее
-
-});
-
-process.on('exit', async () => {
-  if (browserInstance) await browserInstance.close();
 });
