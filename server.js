@@ -17,6 +17,10 @@ async function parsePage(url) {
   try {
     const session = await bb.sessions.create({
       projectId: process.env.BROWSERBASE_PROJECT_ID,
+      proxies: true,
+      browserSettings: {
+        stealth: true,
+      }
     });
 
     browser = await chromium.connectOverCDP(session.connectUrl);
@@ -28,31 +32,24 @@ async function parsePage(url) {
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     });
 
-    // Ждём полной загрузки включая редиректы
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    
-    // Ждём пока навигация полностью завершится
+
     try {
       await page.waitForLoadState('networkidle', { timeout: 10000 });
-    } catch (e) {
-      // networkidle timeout — ок, продолжаем
-    }
+    } catch (e) {}
 
     await page.waitForTimeout(2000);
 
     const result = await page.evaluate(() => {
       const bodyText = document.body.innerText;
 
-      // Название
       const name =
         document.querySelector('h1')?.innerText?.trim() ||
         document.querySelector('[class*="product-title"], [class*="product__title"], [class*="goods-title"]')?.innerText?.trim() ||
         document.title.split(/[–—|·]/)[0].trim();
 
-      // Цена — рубли, евро (разные форматы), доллары
       let price = null;
 
-      // Рубли: 12 990 ₽ или 12990руб
       const priceElRub = [...document.querySelectorAll('*')]
         .find(el =>
           el.children.length === 0 &&
@@ -66,20 +63,15 @@ async function parsePage(url) {
         const m = bodyText.match(/(\d[\d\s]{3,9})\s*[₽руб]/);
         if (m) price = parseInt(m[1].replace(/\s/g, ''));
       }
-
-      // Евро: 399,00 € или € 399 или 399.00€
       if (!price) {
         const m = bodyText.match(/([\d.,]+)\s*€/) || bodyText.match(/€\s*([\d.,]+)/);
         if (m) price = parseFloat(m[1].replace(/\./g, '').replace(',', '.'));
       }
-
-      // Доллары
       if (!price) {
         const m = bodyText.match(/\$\s*([\d.,]+)/);
         if (m) price = parseFloat(m[1].replace(',', '.'));
       }
 
-      // Размер — ДxШxВ + диаметр
       let size = null;
       const sizePatterns = [
         /(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*см/i,
@@ -100,7 +92,6 @@ async function parsePage(url) {
         }
       }
 
-      // Цвет/материал
       let color = null;
       const colorPatterns = [
         /(?:цвет|обивка|покрытие|colour|color)[:\s]+([^\n,\.;]{3,60})/i,
@@ -112,7 +103,6 @@ async function parsePage(url) {
         if (m) { color = (m[1] || m[0]).trim().slice(0, 80); break; }
       }
 
-      // Фото
       let image_url =
         document.querySelector('meta[property="og:image"]')?.content ||
         document.querySelector('meta[name="og:image"]')?.content ||
