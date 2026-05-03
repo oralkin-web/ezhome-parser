@@ -17,7 +17,6 @@ async function parsePage(url) {
   try {
     const session = await bb.sessions.create({
       projectId: process.env.BROWSERBASE_PROJECT_ID,
-      proxies: true,
       browserSettings: {
         stealth: true,
       }
