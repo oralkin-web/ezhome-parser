@@ -10,7 +10,7 @@ app.use(express.static('public'));
 
 const bb = new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY });
 
-async function parsePage(url) {
+async function parsePage(url, debug = false) {
   let browser;
   try {
     const session = await bb.sessions.create({
@@ -32,7 +32,7 @@ async function parsePage(url) {
     try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch(e) {}
     await page.waitForTimeout(2000);
 
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate((isDebug) => {
       const GARBAGE = [
         'на фото может', 'может отличаться', 'реального изделия', 'представленного на фото',
         'выдерживает', 'эксплуатацию', 'особенностей', 'изображениях', 'фотографий',
@@ -40,7 +40,6 @@ async function parsePage(url) {
         'корзину', 'купить', 'заказать', 'наличии', 'популярные', 'запросы', 'обивки:'
       ];
       const isGarbage = (s) => !s || s.trim().length < 2 || GARBAGE.some(g => s.toLowerCase().includes(g));
-      // Только буквы/пробелы/дефис — не цифры и не "+N"
       const isColorGarbage = (s) => !s || /^[\d\s\+\-]+$/.test(s.trim()) || isGarbage(s);
 
       // JSON-LD
@@ -62,11 +61,11 @@ async function parsePage(url) {
         document.querySelector('[class*="product-title"],[class*="product__title"],[class*="goods-title"]')?.innerText?.trim() ||
         document.title.split(/[–—|·]/)[0].trim();
 
-      // ── ЦЕНА — берём минимальную из найденных разумных цен (актуальная/скидочная) ──
+      // ── ЦЕНА — диагностика ──
+      const debugPrices = [];
       let price = null;
-      const allPrices = [];
 
-      // 1. Специфичные CSS классы
+      // 1. CSS классы
       const priceSelectors = [
         '[class*="price__current"]','[class*="price_current"]','[class*="price-current"]',
         '[class*="price__value"]','[class*="price-value"]','[class*="priceValue"]',
@@ -76,40 +75,50 @@ async function parsePage(url) {
         '[class*="price__number"]','[class*="price__amount"]','[class*="price__sale"]',
         '[class*="price__discount"]','[class*="price__new"]',
       ];
+      const cssFound = [];
       for (const sel of priceSelectors) {
         for (const el of document.querySelectorAll(sel)) {
-          if (el.children.length === 0) {
+          if (el.children.length === 0 && /\d/.test(el.innerText)) {
             const m = el.innerText.match(/(\d[\d\s]{2,10})/);
             if (m) {
               const p = parseInt(m[1].replace(/\s/g, ''));
-              if (p >= 1000 && p <= 10000000) allPrices.push(p);
+              if (p >= 1000 && p <= 10000000) {
+                cssFound.push({ sel, text: el.innerText.trim(), val: p });
+              }
             }
           }
         }
       }
+      if (isDebug) debugPrices.push({ source: 'css', found: cssFound });
+
+      // Берём минимальную из CSS >= 3000
+      const cssVals = cssFound.map(x => x.val).filter(p => p >= 3000);
+      if (cssVals.length > 0) price = Math.min(...cssVals);
 
       // 2. JSON-LD
+      let jsonldPrice = null;
       if (jsonld?.offers) {
         const offers = Array.isArray(jsonld.offers) ? jsonld.offers[0] : jsonld.offers;
-        const p = parseFloat(String(offers?.price || '').replace(/\s/g, ''));
-        if (p >= 1000 && p <= 10000000) allPrices.push(p);
+        jsonldPrice = parseFloat(String(offers?.price || '').replace(/\s/g, ''));
+        if (!(jsonldPrice >= 1000 && jsonldPrice <= 10000000)) jsonldPrice = null;
       }
+      if (isDebug) debugPrices.push({ source: 'jsonld', val: jsonldPrice });
+      if (!price && jsonldPrice) price = jsonldPrice;
 
-      // 3. Листовые элементы с ₽
+      // 3. Все элементы с ₽ на странице — берём топ-5 самых больших
+      const allRub = [];
       for (const el of document.querySelectorAll('*')) {
-        if (el.children.length === 0 && /[\d\s]{4,12}[₽руб]/.test(el.innerText)) {
-          const m = el.innerText.match(/(\d[\d\s]{3,10})/);
+        if (el.children.length === 0 && /[\d\s]{3,12}[₽]/.test(el.innerText)) {
+          const m = el.innerText.match(/(\d[\d\s]{2,10})/);
           if (m) {
             const p = parseInt(m[1].replace(/\s/g, ''));
-            if (p >= 1000 && p <= 10000000) allPrices.push(p);
+            if (p >= 3000 && p <= 10000000) allRub.push({ text: el.innerText.trim().slice(0,30), val: p, cls: el.className?.slice(0,50) });
           }
         }
       }
-
-      // Берём минимальную — это актуальная цена (со скидкой если есть)
-      if (allPrices.length > 0) {
-        price = Math.min(...allPrices);
-      }
+      allRub.sort((a, b) => b.val - a.val);
+      if (isDebug) debugPrices.push({ source: 'rub_elements', top5: allRub.slice(0,5) });
+      if (!price && allRub.length > 0) price = allRub[0].val;
 
       // 4. Евро
       if (!price) {
@@ -147,8 +156,6 @@ async function parsePage(url) {
           }
         }
       }
-
-      // Fallback — ищем размер в названии товара
       if (!size && name) {
         for (const p of sizePatterns) {
           const m = name.match(p);
@@ -166,26 +173,12 @@ async function parsePage(url) {
 
       // ── ЦВЕТ ──
       let color = null;
-
-      // 1. JSON-LD
-      if (jsonld?.color && !isColorGarbage(jsonld.color)) {
-        color = jsonld.color.trim().slice(0, 60);
-      }
-
-      // 2. CSS классы — фильтруем "+26" и чисто цифровые
+      if (jsonld?.color && !isColorGarbage(jsonld.color)) color = jsonld.color.trim().slice(0, 60);
       if (!color) {
-        const colorEls = [...document.querySelectorAll(
-          '[class*="color"],[class*="colour"],[class*="Color"]'
-        )].filter(el =>
-          el.children.length === 0 &&
-          el.innerText.trim().length >= 2 &&
-          el.innerText.trim().length <= 40 &&
-          !isColorGarbage(el.innerText)
-        );
+        const colorEls = [...document.querySelectorAll('[class*="color"],[class*="colour"],[class*="Color"]')]
+          .filter(el => el.children.length === 0 && el.innerText.trim().length >= 2 && el.innerText.trim().length <= 40 && !isColorGarbage(el.innerText));
         if (colorEls.length > 0) color = colorEls[0].innerText.trim();
       }
-
-      // 3. Активный/выбранный элемент цвета
       if (!color) {
         const activeColor = document.querySelector(
           '[class*="active"][class*="color"],[class*="selected"][class*="color"],' +
@@ -197,8 +190,6 @@ async function parsePage(url) {
           if (t && !isColorGarbage(t)) color = t.slice(0, 60);
         }
       }
-
-      // 4. Строгие паттерны
       if (!color) {
         const strictPatterns = [
           /(?:^|\n)\s*цвет\s*[:\-]?\s*([^\n]{2,40})/im,
@@ -212,37 +203,25 @@ async function parsePage(url) {
           if (m && !isColorGarbage(m[1])) { color = m[1].trim().slice(0, 60); break; }
         }
       }
-
-      // 5. Материал
       if (!color) {
         const m = bodyText.match(/\b(велюр|бархат|экокожа|рогожка|шенилл|флок|текстиль|букле|лён|замша)\b[^\n,\.;]{0,25}/i);
         if (m && !isColorGarbage(m[0])) color = m[0].trim().slice(0, 60);
       }
-
-      // 6. Fallback — из названия товара (цвет часто в скобках или после слеша)
       if (!color && name) {
         const mName = name.match(/(?:цвет|обивка)[:\s]+([^\n,\.;]{2,40})/i) ||
                       name.match(/\b(велюр|бархат|экокожа|рогожка|шенилл|флок|букле)\b[^\n,\.;]{0,20}/i);
-        if (mName && !isColorGarbage(mName[1] || mName[0])) {
-          color = (mName[1] || mName[0]).trim().slice(0, 60);
-        }
+        if (mName && !isColorGarbage(mName[1] || mName[0])) color = (mName[1] || mName[0]).trim().slice(0, 60);
       }
 
       // ── ФОТО ──
-      let image_url =
-        document.querySelector('meta[property="og:image"]')?.content ||
+      let image_url = document.querySelector('meta[property="og:image"]')?.content ||
         document.querySelector('meta[name="og:image"]')?.content || null;
-
-      if (image_url && (image_url.includes('.svg') || image_url.includes('favicon') || image_url.includes('logo'))) {
-        image_url = null;
-      }
-
+      if (image_url && (image_url.includes('.svg') || image_url.includes('favicon') || image_url.includes('logo'))) image_url = null;
       if (!image_url && jsonld?.image) {
         const img = Array.isArray(jsonld.image) ? jsonld.image[0] : jsonld.image;
         if (typeof img === 'string' && img.startsWith('http') && !img.includes('.svg')) image_url = img;
         else if (img?.url) image_url = img.url;
       }
-
       if (!image_url) {
         const imgs = [...document.querySelectorAll('img')]
           .map(i => ({ src: i.src||i.currentSrc, w: i.naturalWidth, h: i.naturalHeight, alt: (i.alt||'').toLowerCase(), src_lower: (i.src||'').toLowerCase() }))
@@ -250,7 +229,6 @@ async function parsePage(url) {
           .sort((a, b) => (b.w * b.h) - (a.w * a.h));
         if (imgs.length > 0) image_url = imgs[0].src;
       }
-
       if (!image_url) {
         const lazy = [...document.querySelectorAll('img[data-src],img[data-lazy],img[data-original]')]
           .map(i => i.dataset.src || i.dataset.lazy || i.dataset.original)
@@ -258,8 +236,9 @@ async function parsePage(url) {
         if (lazy) image_url = lazy;
       }
 
+      if (isDebug) return { name, price, size, color, image_url, _debug: { prices: debugPrices, jsonld_color: jsonld?.color, jsonld_price: jsonld?.offers?.price } };
       return { name, price, size, color, image_url };
-    });
+    }, debug);
 
     await browser.close();
     return { ok: true, ...result, url };
@@ -275,12 +254,20 @@ app.post('/parse', async (req, res) => {
   if (!url) return res.status(400).json({ error: 'URL обязателен' });
   console.log('Парсю:', url);
   const start = Date.now();
-  const result = await parsePage(url);
+  const result = await parsePage(url, false);
   result.time_ms = Date.now() - start;
   console.log('Готово за', result.time_ms, 'мс:', result.name);
   res.json(result);
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+// Диагностический эндпоинт
+app.post('/debug', async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'URL обязателен' });
+  console.log('Дебаг:', url);
+  const result = await parsePage(url, true);
+  res.json(result);
+});
 
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.listen(PORT, () => console.log(`ezhome-parser запущен на порту ${PORT}`));
