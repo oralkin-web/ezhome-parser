@@ -32,14 +32,21 @@ async function parsePage(url, debug = false) {
     try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch(e) {}
     // Закрываем попапы (город, куки, и т.д.)
     try {
-      await page.getByText('Да, верно').first().click({ timeout: 3000 });
+      // Ждём появления попапа и кликаем
+      await page.waitForSelector('button', { timeout: 3000 });
+      const buttons = await page.$$('button');
+      for (const btn of buttons) {
+        const text = await btn.innerText().catch(() => '');
+        if (text.includes('Да') || text.includes('верно') || text.includes('Принять')) {
+          await btn.click({ force: true });
+          await page.waitForTimeout(500);
+          break;
+        }
+      }
     } catch(e) {}
-    try {
-      await page.getByText('Да верно').first().click({ timeout: 2000 });
-    } catch(e) {}
-    try {
-      await page.getByRole('button', { name: /закрыть|close|принять|ок/i }).first().click({ timeout: 2000 });
-    } catch(e) {}
+    // Нажимаем Escape на случай других попапов
+    try { await page.keyboard.press('Escape'); } catch(e) {}
+    await page.waitForTimeout(1000);
 
     // Ждём появления цены на странице (для динамических сайтов)
     try {
