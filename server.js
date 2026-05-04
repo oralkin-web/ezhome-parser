@@ -48,14 +48,14 @@ async function parsePage(url, debug = false) {
     try { await page.keyboard.press('Escape'); } catch(e) {}
     await page.waitForTimeout(1000);
 
-    // Ждём появления цены на странице (для динамических сайтов)
+    // Ждём появления цены на странице
     try {
       await page.waitForSelector(
-        '[class*="price"],[itemprop="price"],[class*="Price"]',
+        '[data-testid="price"],[class*="price__current"],[class*="price_current"],[itemprop="price"]',
         { timeout: 8000 }
       );
     } catch(e) {}
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000);
 
     const result = await page.evaluate((isDebug) => {
       const GARBAGE = [
