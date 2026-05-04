@@ -30,11 +30,23 @@ async function parsePage(url, debug = false) {
 
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch(e) {}
+    // Закрываем попапы (город, куки, и т.д.)
+    try {
+      // Попап выбора города divan.ru
+      const cityBtn = await page.$('button:has-text("Да, верно"), button:has-text("Да верно"), [class*="city"] button, [class*="modal"] button:first-child');
+      if (cityBtn) await cityBtn.click();
+    } catch(e) {}
+    try {
+      // Общие кнопки закрытия попапов
+      const closeBtn = await page.$('[class*="close"], [class*="modal__close"], [aria-label="close"], [aria-label="закрыть"]');
+      if (closeBtn) await closeBtn.click();
+    } catch(e) {}
+
     // Ждём появления цены на странице (для динамических сайтов)
     try {
       await page.waitForSelector(
         '[class*="price"],[itemprop="price"],[class*="Price"]',
-        { timeout: 5000 }
+        { timeout: 8000 }
       );
     } catch(e) {}
     await page.waitForTimeout(2000);
