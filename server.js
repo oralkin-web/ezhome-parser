@@ -30,6 +30,13 @@ async function parsePage(url, debug = false) {
 
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch(e) {}
+    // Ждём появления цены на странице (для динамических сайтов)
+    try {
+      await page.waitForSelector(
+        '[class*="price"],[itemprop="price"],[class*="Price"]',
+        { timeout: 5000 }
+      );
+    } catch(e) {}
     await page.waitForTimeout(2000);
 
     const result = await page.evaluate((isDebug) => {
@@ -37,7 +44,8 @@ async function parsePage(url, debug = false) {
         'на фото может', 'может отличаться', 'реального изделия', 'представленного на фото',
         'выдерживает', 'эксплуатацию', 'особенностей', 'изображениях', 'фотографий',
         'отправим', 'мессенджер', 'доставка', 'оплата', 'подробнее', 'добавить',
-        'корзину', 'купить', 'заказать', 'наличии', 'популярные', 'запросы', 'обивки:'
+        'корзину', 'купить', 'заказать', 'наличии', 'популярные', 'запросы', 'обивки:',
+        'на сайте могут', 'от реальных', 'изображени', 'фотограф'
       ];
       const isGarbage = (s) => !s || s.trim().length < 2 || GARBAGE.some(g => s.toLowerCase().includes(g));
       const isColorGarbage = (s) => !s || /^[\d\s\+\-]+$/.test(s.trim()) || isGarbage(s);
