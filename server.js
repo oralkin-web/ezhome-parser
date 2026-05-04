@@ -100,6 +100,7 @@ async function parsePage(url, debug = false) {
         '[class*="main-price"]','[class*="actual-price"]','[class*="final-price"]',
         '[class*="price__number"]','[class*="price__amount"]','[class*="price__sale"]',
         '[class*="price__discount"]','[class*="price__new"]',
+        '[data-testid="price"]','[data-test="price"]','[data-qa="price"]',
       ];
       const cssFound = [];
       for (const sel of priceSelectors) {
