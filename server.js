@@ -106,7 +106,7 @@ async function parsePage(url, debug = false) {
       for (const sel of priceSelectors) {
         for (const el of document.querySelectorAll(sel)) {
           if (el.children.length === 0 && /\d/.test(el.innerText)) {
-            const m = el.innerText.match(/(\d[\d\s]{2,10})/);
+            const m = el.innerText.replace(/руб\.?/g, "₽").match(/(\d[\d\s]{2,10})/);
             if (m) {
               const p = parseInt(m[1].replace(/\s/g, ''));
               if (p >= 1000 && p <= 10000000) {
