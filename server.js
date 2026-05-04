@@ -28,6 +28,24 @@ async function parsePage(url, debug = false) {
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     });
 
+    // Перехватываем API ответы с ценами
+    let interceptedPrice = null;
+    page.on('response', async (response) => {
+      try {
+        const url_resp = response.url();
+        const ct = response.headers()['content-type'] || '';
+        if (ct.includes('json') && (url_resp.includes('price') || url_resp.includes('product') || url_resp.includes('offer'))) {
+          const text = await response.text().catch(() => '');
+          // Ищем поле price в JSON ответе
+          const m = text.match(/["']price["']\s*:\s*(\d+)/);
+          if (m) {
+            const p = parseInt(m[1]);
+            if (p >= 1000 && p <= 10000000) interceptedPrice = p;
+          }
+        }
+      } catch(e) {}
+    });
+
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch(e) {}
     // Ждём появления цены на странице (для динамических сайтов)
@@ -248,6 +266,10 @@ async function parsePage(url, debug = false) {
       return { name, price, size, color, image_url };
     }, debug);
 
+    // Применяем перехваченную цену если парсер не нашёл
+    if (!result.price && interceptedPrice) {
+      result.price = interceptedPrice;
+    }
     await browser.close();
     return { ok: true, ...result, url };
   } catch (e) {
