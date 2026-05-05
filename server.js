@@ -36,10 +36,8 @@ async function parsePage(url, debug = false) {
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     });
 
-    // Грузим страницу — ждём только domcontentloaded (быстро)
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    // Ждём появления цены ИЛИ максимум 5 секунд
     try {
       await page.waitForSelector(
         '[data-testid="price"],[class*="price__current"],[class*="price_current"],[itemprop="price"],[class*="price__value"],[class*="product__price"]',
@@ -59,8 +57,6 @@ async function parsePage(url, debug = false) {
       }
     } catch(e) {}
     try { await page.keyboard.press('Escape'); } catch(e) {}
-
-    // Минимальная пауза для рендера
     await page.waitForTimeout(1000);
 
     const result = await page.evaluate((isDebug) => {
@@ -93,7 +89,7 @@ async function parsePage(url, debug = false) {
         document.querySelector('[class*="product-title"],[class*="product__title"],[class*="goods-title"]')?.innerText?.trim() ||
         document.title.split(/[–—|·]/)[0].trim();
 
-      // ── ЦЕНА ──
+      // ── ЦЕНА — только в верхних 800px страницы ──
       const debugPrices = [];
       let price = null;
 
@@ -109,11 +105,14 @@ async function parsePage(url, debug = false) {
       ];
       const cssFound = [];
       for (const sel of priceSelectors) {
-        // Для data-testid берём ТОЛЬКО ПЕРВЫЙ элемент — это цена текущего товара
         const isTestId = sel.includes('data-testid') || sel.includes('data-test') || sel.includes('data-qa');
+        // Для data-testid берём первый элемент в верхних 800px
         const els = isTestId
           ? [document.querySelector(sel)].filter(Boolean)
-          : [...document.querySelectorAll(sel)];
+          : [...document.querySelectorAll(sel)].filter(el => {
+              const rect = el.getBoundingClientRect();
+              return rect.top < 800; // только первый экран
+            });
         for (const el of els) {
           const allowChildren = isTestId;
           if ((allowChildren || el.children.length === 0) && /\d/.test(el.innerText)) {
@@ -124,37 +123,37 @@ async function parsePage(url, debug = false) {
             }
           }
         }
-        if (cssFound.length > 0) break; // Нашли в первом подходящем селекторе — хватит
+        if (cssFound.length > 0) break;
       }
       if (isDebug) debugPrices.push({ source: 'css', found: cssFound });
       const cssVals = cssFound.map(x => x.val).filter(p => p >= 3000);
-      if (cssVals.length > 0) price = cssVals[0]; // Первая найденная цена
+      if (cssVals.length > 0) price = cssVals[0];
 
       // JSON-LD
       if (!price && jsonld?.offers) {
         const offers = Array.isArray(jsonld.offers) ? jsonld.offers[0] : jsonld.offers;
         const p = parseFloat(String(offers?.price || '').replace(/\s/g, ''));
         if (p >= 1000 && p <= 10000000) price = p;
-        if (isDebug) debugPrices.push({ source: 'jsonld', val: p });
       }
 
-      // Fallback — все элементы с ₽ или руб, берём наибольшую разумную
+      // Fallback — ₽ только в верхних 800px
       if (!price) {
         const allRub = [];
         for (const el of document.querySelectorAll('*')) {
+          const rect = el.getBoundingClientRect();
+          if (rect.top > 800) continue;
           if (el.children.length === 0 && /[\d\s]{3,12}[₽]|[\d\s]{3,12}руб/.test(el.innerText)) {
             const m = el.innerText.replace(/руб\.?/g, '₽').match(/(\d[\d\s]{2,10})/);
             if (m) {
               const p = parseInt(m[1].replace(/\s/g, ''));
-              // Пропускаем старые/зачёркнутые цены
-            const cls = (el.className || '').toLowerCase();
-            const isOldPrice = cls.includes('old') || cls.includes('cross') || cls.includes('strike') || cls.includes('origin') || cls.includes('before') || cls.includes('prev');
-            if (p >= 3000 && p <= 10000000 && !isOldPrice) allRub.push({ val: p, cls: el.className?.slice(0,50) });
+              const cls = (el.className || '').toLowerCase();
+              const isOld = cls.includes('old') || cls.includes('cross') || cls.includes('strike') || cls.includes('origin') || cls.includes('before') || cls.includes('prev');
+              if (p >= 3000 && p <= 10000000 && !isOld) allRub.push({ val: p });
             }
           }
         }
         allRub.sort((a, b) => b.val - a.val);
-        if (isDebug) debugPrices.push({ source: 'rub_elements', top5: allRub.slice(0,5) });
+        if (isDebug) debugPrices.push({ source: 'rub_top800', top5: allRub.slice(0,5) });
         if (allRub.length > 0) price = allRub[0].val;
       }
 
@@ -169,20 +168,47 @@ async function parsePage(url, debug = false) {
 
       // ── РАЗМЕР ──
       let size = null;
-      const specText = [...document.querySelectorAll(
-        '[class*="spec"],[class*="param"],[class*="char"],[class*="dimension"],[class*="size"],[class*="feature"]'
-      )].map(el => el.innerText).join('\n');
-      const sizeSearch = specText + '\n' + bodyText;
 
-      const sizePatterns = [
-        /([1-9]\d{1,2})\s*[xхх×]\s*([1-9]\d{1,2})\s*[xхх×]\s*([1-9]\d{1,2})\s*см/i,
-        /([1-9]\d{1,2})\s*[xхх×]\s*([1-9]\d{1,2})\s*[xхх×]\s*([1-9]\d{1,2})/i,
-        /([1-9]\d{1,2})\s*[xхх×]\s*([1-9]\d{1,2})\s*см/i,
-        /([1-9]\d{1,2})\s*[xхх×]\s*([1-9]\d{1,2})/i,
+      // Ищем блок характеристик по заголовку
+      let specBlock = '';
+      const headings = [...document.querySelectorAll('h2,h3,h4,th,dt,[class*="title"],[class*="heading"]')];
+      for (const h of headings) {
+        const t = h.innerText?.toLowerCase() || '';
+        if (t.includes('характеристик') || t.includes('параметр') || t.includes('габарит') || t.includes('размер')) {
+          // Берём текст следующего блока
+          let next = h.nextElementSibling;
+          for (let i = 0; i < 5 && next; i++) {
+            specBlock += next.innerText + '\n';
+            next = next.nextElementSibling;
+          }
+          // Также берём родительский блок
+          if (h.parentElement) specBlock += h.parentElement.innerText + '\n';
+          break;
+        }
+      }
+
+      // Также стандартные блоки характеристик
+      const specElText = [...document.querySelectorAll(
+        '[class*="spec"],[class*="param"],[class*="char"],[class*="dimension"],[class*="feature"],' +
+        '[class*="detail"][class*="table"],[class*="detailtable"],[class*="properties"],[class*="attrs"],' +
+        '[class*="technical"],[class*="info-table"],[class*="product-info"]'
+      )].map(el => el.innerText).join('\n');
+
+      const sizeSearch = specBlock + '\n' + specElText + '\n' + bodyText;
+
+      // 1. Паттерны ШхГхВ из твоего списка
+      const namedPatterns = [
+        // ШхГхВ формат: 140х80х90
+        /(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*см/i,
+        /(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*[xхх×]\s*(\d{2,3})/i,
+        /(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*см/i,
+        /(\d{2,3})\s*[xхх×]\s*(\d{2,3})/i,
+        // Диаметр
         /диаметр[:\s]*(\d+[\d,.]*)\s*см/i,
         /ø\s*([1-9]\d{0,2}[\d,.]*)/i,
       ];
-      for (const p of sizePatterns) {
+
+      for (const p of namedPatterns) {
         const m = sizeSearch.match(p);
         if (m) {
           const nums = [m[1], m[2], m[3]].filter(Boolean).map(Number);
@@ -194,31 +220,42 @@ async function parsePage(url, debug = false) {
           }
         }
       }
-      // Умный парсинг размеров по словам (Ширина/Глубина/Высота/Длина)
+
+      // 2. Собираем Ширину/Глубину/Высоту по словам из списка
       if (!size) {
         const dimMap = {};
-        const dimPatterns = [
-          [/(?:ширина|width)[,:\s]+(\d+)/gi, 'w'],
-          [/(?:глубина|depth)[,:\s]+(\d+)/gi, 'd'],
-          [/(?:высота|height)[,:\s]+(\d+)/gi, 'h'],
-          [/(?:длина|length)[,:\s]+(\d+)/gi, 'l'],
+
+        // Паттерны поиска из твоего списка
+        const dimKeywords = [
+          { keys: ['ширина', 'габаритная ширина', 'шир', 'width', 'w'], dim: 'w' },
+          { keys: ['глубина', 'габаритная глубина', 'глуб', 'depth', 'г'], dim: 'd' },
+          { keys: ['высота', 'габаритная высота', 'выс', 'height', 'в'], dim: 'h' },
+          { keys: ['длина', 'length', 'д'], dim: 'l' },
         ];
-        for (const [re, key] of dimPatterns) {
-          const m = sizeSearch.match(re);
-          if (m) {
-            const val = parseInt(m[0].match(/(\d+)/)[1]);
-            if (val >= 10 && val <= 500) dimMap[key] = val;
+
+        for (const { keys, dim } of dimKeywords) {
+          for (const key of keys) {
+            // Ищем "Ширина, см\n53" или "Ширина: 53" или "Ширина 53 см"
+            const re = new RegExp(key + '[,:\\s,см]+([\\d]+)', 'i');
+            const m = sizeSearch.match(re);
+            if (m) {
+              const val = parseInt(m[1]);
+              if (val >= 10 && val <= 500) { dimMap[dim] = val; break; }
+            }
           }
         }
+
+        // Собираем размер
         if (dimMap.w && dimMap.d && dimMap.h) size = `${dimMap.w}x${dimMap.d}x${dimMap.h}`;
         else if (dimMap.l && dimMap.w && dimMap.h) size = `${dimMap.l}x${dimMap.w}x${dimMap.h}`;
         else if (dimMap.w && dimMap.h) size = `${dimMap.w}x${dimMap.h}`;
         else if (dimMap.l && dimMap.h) size = `${dimMap.l}x${dimMap.h}`;
+        else if (dimMap.w && dimMap.d) size = `${dimMap.w}x${dimMap.d}`;
       }
 
-      // Fallback из названия
+      // 3. Fallback из названия
       if (!size && name) {
-        for (const p of sizePatterns) {
+        for (const p of namedPatterns) {
           const m = name.match(p);
           if (m) {
             const nums = [m[1], m[2], m[3]].filter(Boolean).map(Number);
@@ -269,16 +306,9 @@ async function parsePage(url, debug = false) {
         if (m && !isColorGarbage(m[0])) color = m[0].trim().slice(0, 60);
       }
       if (!color && name) {
-        const mName = name.match(/(?:цвет|обивка)[:\s]+([^\n,\.;]{2,40})/i) ||
-                      name.match(/\b(велюр|бархат|экокожа|рогожка|шенилл|флок|букле)\b[^\n,\.;]{0,20}/i);
-        if (mName && !isColorGarbage(mName[1] || mName[0])) color = (mName[1] || mName[0]).trim().slice(0, 60);
-      }
-      // Цвет из названия — слово после размера (напр. "Диван 140x80 Латте")
-      if (!color && name) {
-        const afterSize = name.match(/\d+[x×хх]\d+(?:[x×хх]\d+)?\s+([А-ЯЁа-яёA-Za-z][^\d\n,\.]{1,40})/i);
+        const afterSize = name.match(/\d+[x×хх][\d×хх\d]+\s+([А-ЯЁа-яёA-Za-z][^\d\n,\.]{1,40})/i);
         if (afterSize && !isColorGarbage(afterSize[1])) color = afterSize[1].trim().slice(0, 60);
       }
-      // Базовые цвета из названия
       if (!color && name) {
         const basicColors = name.match(/\b(чёрный|черный|белый|серый|бежевый|коричневый|синий|зеленый|зелёный|красный|розовый|голубой|жёлтый|желтый|оранжевый|фиолетовый|золотой|серебристый|латте|капучино|мокко|антрацит|графит|слоновая)\b/i);
         if (basicColors) color = basicColors[0].trim();
@@ -288,12 +318,14 @@ async function parsePage(url, debug = false) {
       let image_url = document.querySelector('meta[property="og:image"]')?.content ||
         document.querySelector('meta[name="og:image"]')?.content || null;
       if (image_url && (image_url.includes('.svg') || image_url.includes('favicon') || image_url.includes('logo') || image_url.includes('photo_image') || image_url.includes('no_photo') || image_url.includes('no-photo') || image_url.includes('noimage') || image_url.includes('placeholder'))) image_url = null;
+
       if (!image_url && jsonld?.image) {
         const img = Array.isArray(jsonld.image) ? jsonld.image[0] : jsonld.image;
         if (typeof img === 'string' && img.startsWith('http') && !img.includes('.svg')) image_url = img;
         else if (img?.url) image_url = img.url;
       }
-      // Карусель/галерея — первое фото товара (приоритет)
+
+      // Карусель/галерея — первое фото товара
       if (!image_url) {
         const carouselImg = document.querySelector(
           '[class*="carousel"] img,[class*="gallery"] img,[class*="slider"] img,' +
@@ -302,9 +334,7 @@ async function parsePage(url, debug = false) {
         );
         if (carouselImg) {
           const src = carouselImg.src || carouselImg.currentSrc || carouselImg.dataset.src;
-          if (src && src.startsWith('http') && !src.includes('.svg') && !src.includes('logo')) {
-            image_url = src;
-          }
+          if (src && src.startsWith('http') && !src.includes('.svg') && !src.includes('logo')) image_url = src;
         }
       }
 
@@ -315,6 +345,7 @@ async function parsePage(url, debug = false) {
           .sort((a, b) => (b.w * b.h) - (a.w * a.h));
         if (imgs.length > 0) image_url = imgs[0].src;
       }
+
       if (!image_url) {
         const lazy = [...document.querySelectorAll('img[data-src],img[data-lazy],img[data-original]')]
           .map(i => i.dataset.src || i.dataset.lazy || i.dataset.original)
@@ -322,7 +353,7 @@ async function parsePage(url, debug = false) {
         if (lazy) image_url = lazy;
       }
 
-      if (isDebug) return { name, price, size, color, image_url, _debug: { prices: debugPrices, jsonld_color: jsonld?.color, jsonld_price: jsonld?.offers?.price } };
+      if (isDebug) return { name, price, size, color, image_url, _debug: { prices: debugPrices } };
       return { name, price, size, color, image_url };
     }, debug);
 
