@@ -21,9 +21,13 @@ const bb = new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY });
 async function parsePage(url, debug = false) {
   let browser;
   try {
+    // Прокси только для сайтов с защитой
+    const PROXY_SITES = ['hoff.ru', 'divan.ru'];
+    const needsProxy = PROXY_SITES.some(site => url.includes(site));
+
     const session = await bb.sessions.create({
       projectId: process.env.BROWSERBASE_PROJECT_ID,
-      proxies: true,
+      ...(needsProxy ? { proxies: true } : {}),
       browserSettings: { stealth: true }
     });
 
