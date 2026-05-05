@@ -36,34 +36,32 @@ async function parsePage(url, debug = false) {
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
     });
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch(e) {}
-    // Закрываем попапы (город, куки, и т.д.)
+    // Грузим страницу — ждём только domcontentloaded (быстро)
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    // Ждём появления цены ИЛИ максимум 5 секунд
     try {
-      // Ждём появления попапа и кликаем
-      await page.waitForSelector('button', { timeout: 3000 });
+      await page.waitForSelector(
+        '[data-testid="price"],[class*="price__current"],[class*="price_current"],[itemprop="price"],[class*="price__value"],[class*="product__price"]',
+        { timeout: 5000 }
+      );
+    } catch(e) {}
+
+    // Закрываем попапы
+    try {
       const buttons = await page.$$('button');
       for (const btn of buttons) {
         const text = await btn.innerText().catch(() => '');
         if (text.includes('Да') || text.includes('верно') || text.includes('Принять')) {
           await btn.click({ force: true });
-          await page.waitForTimeout(500);
           break;
         }
       }
     } catch(e) {}
-    // Нажимаем Escape на случай других попапов
     try { await page.keyboard.press('Escape'); } catch(e) {}
-    await page.waitForTimeout(1000);
 
-    // Ждём появления цены на странице
-    try {
-      await page.waitForSelector(
-        '[data-testid="price"],[class*="price__current"],[class*="price_current"],[itemprop="price"]',
-        { timeout: 8000 }
-      );
-    } catch(e) {}
-    await page.waitForTimeout(3000);
+    // Минимальная пауза для рендера
+    await page.waitForTimeout(1000);
 
     const result = await page.evaluate((isDebug) => {
       const GARBAGE = [
@@ -95,67 +93,63 @@ async function parsePage(url, debug = false) {
         document.querySelector('[class*="product-title"],[class*="product__title"],[class*="goods-title"]')?.innerText?.trim() ||
         document.title.split(/[–—|·]/)[0].trim();
 
-      // ── ЦЕНА — диагностика ──
+      // ── ЦЕНА ──
       const debugPrices = [];
       let price = null;
 
-      // 1. CSS классы
       const priceSelectors = [
+        '[data-testid="price"]','[data-test="price"]','[data-qa="price"]',
         '[class*="price__current"]','[class*="price_current"]','[class*="price-current"]',
         '[class*="price__value"]','[class*="price-value"]','[class*="priceValue"]',
         '[class*="product__price"]','[class*="productPrice"]','[class*="product-price"]',
         '[itemprop="price"]','[class*="offer__price"]','[class*="item-price"]',
         '[class*="main-price"]','[class*="actual-price"]','[class*="final-price"]',
         '[class*="price__number"]','[class*="price__amount"]','[class*="price__sale"]',
-        '[class*="price__discount"]','[class*="price__new"]',
-        '[data-testid="price"]','[data-test="price"]','[data-qa="price"]',
+        '[class*="price__new"]',
       ];
       const cssFound = [];
       for (const sel of priceSelectors) {
         for (const el of document.querySelectorAll(sel)) {
-          if ((sel.includes("data-testid") || el.children.length === 0) && /\d/.test(el.innerText)) {
-            const m = el.innerText.replace(/руб\.?/g, "₽").match(/(\d[\d\s]{2,10})/);
+          const allowChildren = sel.includes('data-testid') || sel.includes('data-test') || sel.includes('data-qa');
+          if ((allowChildren || el.children.length === 0) && /\d/.test(el.innerText)) {
+            const m = el.innerText.replace(/руб\.?/g, '₽').match(/(\d[\d\s]{2,10})/);
             if (m) {
               const p = parseInt(m[1].replace(/\s/g, ''));
-              if (p >= 1000 && p <= 10000000) {
-                cssFound.push({ sel, text: el.innerText.trim(), val: p });
-              }
+              if (p >= 1000 && p <= 10000000) cssFound.push({ sel, text: el.innerText.trim(), val: p });
             }
           }
         }
       }
       if (isDebug) debugPrices.push({ source: 'css', found: cssFound });
-
-      // Берём минимальную из CSS >= 3000
       const cssVals = cssFound.map(x => x.val).filter(p => p >= 3000);
       if (cssVals.length > 0) price = Math.min(...cssVals);
 
-      // 2. JSON-LD
-      let jsonldPrice = null;
-      if (jsonld?.offers) {
+      // JSON-LD
+      if (!price && jsonld?.offers) {
         const offers = Array.isArray(jsonld.offers) ? jsonld.offers[0] : jsonld.offers;
-        jsonldPrice = parseFloat(String(offers?.price || '').replace(/\s/g, ''));
-        if (!(jsonldPrice >= 1000 && jsonldPrice <= 10000000)) jsonldPrice = null;
+        const p = parseFloat(String(offers?.price || '').replace(/\s/g, ''));
+        if (p >= 1000 && p <= 10000000) price = p;
+        if (isDebug) debugPrices.push({ source: 'jsonld', val: p });
       }
-      if (isDebug) debugPrices.push({ source: 'jsonld', val: jsonldPrice });
-      if (!price && jsonldPrice) price = jsonldPrice;
 
-      // 3. Все элементы с ₽ на странице — берём топ-5 самых больших
-      const allRub = [];
-      for (const el of document.querySelectorAll('*')) {
-        if (el.children.length === 0 && /[\d\s]{3,12}[₽]/.test(el.innerText)) {
-          const m = el.innerText.match(/(\d[\d\s]{2,10})/);
-          if (m) {
-            const p = parseInt(m[1].replace(/\s/g, ''));
-            if (p >= 3000 && p <= 10000000) allRub.push({ text: el.innerText.trim().slice(0,30), val: p, cls: el.className?.slice(0,50) });
+      // Fallback — все элементы с ₽ или руб, берём наибольшую разумную
+      if (!price) {
+        const allRub = [];
+        for (const el of document.querySelectorAll('*')) {
+          if (el.children.length === 0 && /[\d\s]{3,12}[₽]|[\d\s]{3,12}руб/.test(el.innerText)) {
+            const m = el.innerText.replace(/руб\.?/g, '₽').match(/(\d[\d\s]{2,10})/);
+            if (m) {
+              const p = parseInt(m[1].replace(/\s/g, ''));
+              if (p >= 3000 && p <= 10000000) allRub.push({ val: p, cls: el.className?.slice(0,50) });
+            }
           }
         }
+        allRub.sort((a, b) => b.val - a.val);
+        if (isDebug) debugPrices.push({ source: 'rub_elements', top5: allRub.slice(0,5) });
+        if (allRub.length > 0) price = allRub[0].val;
       }
-      allRub.sort((a, b) => b.val - a.val);
-      if (isDebug) debugPrices.push({ source: 'rub_elements', top5: allRub.slice(0,5) });
-      if (!price && allRub.length > 0) price = allRub[0].val;
 
-      // 4. Евро
+      // Евро
       if (!price) {
         const m = bodyText.match(/([\d.,]+)\s*€/) || bodyText.match(/€\s*([\d.,]+)/);
         if (m) {
@@ -191,6 +185,7 @@ async function parsePage(url, debug = false) {
           }
         }
       }
+      // Fallback из названия
       if (!size && name) {
         for (const p of sizePatterns) {
           const m = name.match(p);
@@ -247,6 +242,11 @@ async function parsePage(url, debug = false) {
                       name.match(/\b(велюр|бархат|экокожа|рогожка|шенилл|флок|букле)\b[^\n,\.;]{0,20}/i);
         if (mName && !isColorGarbage(mName[1] || mName[0])) color = (mName[1] || mName[0]).trim().slice(0, 60);
       }
+      // Базовые цвета из названия
+      if (!color && name) {
+        const basicColors = name.match(/\b(чёрный|черный|белый|серый|бежевый|коричневый|синий|зеленый|зелёный|красный|розовый|голубой|жёлтый|желтый|оранжевый|фиолетовый|золотой|серебристый)\b/i);
+        if (basicColors) color = basicColors[0].trim();
+      }
 
       // ── ФОТО ──
       let image_url = document.querySelector('meta[property="og:image"]')?.content ||
@@ -295,11 +295,9 @@ app.post('/parse', async (req, res) => {
   res.json(result);
 });
 
-// Диагностический эндпоинт
 app.post('/debug', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL обязателен' });
-  console.log('Дебаг:', url);
   const result = await parsePage(url, true);
   res.json(result);
 });
