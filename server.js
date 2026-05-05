@@ -271,6 +271,21 @@ async function parsePage(url, debug = false) {
         if (typeof img === 'string' && img.startsWith('http') && !img.includes('.svg')) image_url = img;
         else if (img?.url) image_url = img.url;
       }
+      // Карусель/галерея — первое фото товара (приоритет)
+      if (!image_url) {
+        const carouselImg = document.querySelector(
+          '[class*="carousel"] img,[class*="gallery"] img,[class*="slider"] img,' +
+          '[class*="swiper"] img,[class*="product-image"] img,[class*="productImage"] img,' +
+          '[class*="product__image"] img,[class*="product-photo"] img'
+        );
+        if (carouselImg) {
+          const src = carouselImg.src || carouselImg.currentSrc || carouselImg.dataset.src;
+          if (src && src.startsWith('http') && !src.includes('.svg') && !src.includes('logo')) {
+            image_url = src;
+          }
+        }
+      }
+
       if (!image_url) {
         const imgs = [...document.querySelectorAll('img')]
           .map(i => ({ src: i.src||i.currentSrc, w: i.naturalWidth, h: i.naturalHeight, alt: (i.alt||'').toLowerCase(), src_lower: (i.src||'').toLowerCase() }))
