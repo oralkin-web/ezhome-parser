@@ -251,9 +251,14 @@ async function parsePage(url, debug = false) {
                       name.match(/\b(велюр|бархат|экокожа|рогожка|шенилл|флок|букле)\b[^\n,\.;]{0,20}/i);
         if (mName && !isColorGarbage(mName[1] || mName[0])) color = (mName[1] || mName[0]).trim().slice(0, 60);
       }
+      // Цвет из названия — слово после размера (напр. "Диван 140x80 Латте")
+      if (!color && name) {
+        const afterSize = name.match(/\d+[x×хх]\d+(?:[x×хх]\d+)?\s+([А-ЯЁа-яёA-Za-z][^\d\n,\.]{1,40})/i);
+        if (afterSize && !isColorGarbage(afterSize[1])) color = afterSize[1].trim().slice(0, 60);
+      }
       // Базовые цвета из названия
       if (!color && name) {
-        const basicColors = name.match(/\b(чёрный|черный|белый|серый|бежевый|коричневый|синий|зеленый|зелёный|красный|розовый|голубой|жёлтый|желтый|оранжевый|фиолетовый|золотой|серебристый)\b/i);
+        const basicColors = name.match(/\b(чёрный|черный|белый|серый|бежевый|коричневый|синий|зеленый|зелёный|красный|розовый|голубой|жёлтый|желтый|оранжевый|фиолетовый|золотой|серебристый|латте|капучино|мокко|антрацит|графит|слоновая)\b/i);
         if (basicColors) color = basicColors[0].trim();
       }
 
