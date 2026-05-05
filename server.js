@@ -109,8 +109,13 @@ async function parsePage(url, debug = false) {
       ];
       const cssFound = [];
       for (const sel of priceSelectors) {
-        for (const el of document.querySelectorAll(sel)) {
-          const allowChildren = sel.includes('data-testid') || sel.includes('data-test') || sel.includes('data-qa');
+        // Для data-testid берём ТОЛЬКО ПЕРВЫЙ элемент — это цена текущего товара
+        const isTestId = sel.includes('data-testid') || sel.includes('data-test') || sel.includes('data-qa');
+        const els = isTestId
+          ? [document.querySelector(sel)].filter(Boolean)
+          : [...document.querySelectorAll(sel)];
+        for (const el of els) {
+          const allowChildren = isTestId;
           if ((allowChildren || el.children.length === 0) && /\d/.test(el.innerText)) {
             const m = el.innerText.replace(/руб\.?/g, '₽').match(/(\d[\d\s]{2,10})/);
             if (m) {
@@ -119,10 +124,11 @@ async function parsePage(url, debug = false) {
             }
           }
         }
+        if (cssFound.length > 0) break; // Нашли в первом подходящем селекторе — хватит
       }
       if (isDebug) debugPrices.push({ source: 'css', found: cssFound });
       const cssVals = cssFound.map(x => x.val).filter(p => p >= 3000);
-      if (cssVals.length > 0) price = Math.min(...cssVals);
+      if (cssVals.length > 0) price = cssVals[0]; // Первая найденная цена
 
       // JSON-LD
       if (!price && jsonld?.offers) {
