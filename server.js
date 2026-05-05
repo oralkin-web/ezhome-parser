@@ -140,7 +140,10 @@ async function parsePage(url, debug = false) {
             const m = el.innerText.replace(/руб\.?/g, '₽').match(/(\d[\d\s]{2,10})/);
             if (m) {
               const p = parseInt(m[1].replace(/\s/g, ''));
-              if (p >= 3000 && p <= 10000000) allRub.push({ val: p, cls: el.className?.slice(0,50) });
+              // Пропускаем старые/зачёркнутые цены
+            const cls = (el.className || '').toLowerCase();
+            const isOldPrice = cls.includes('old') || cls.includes('cross') || cls.includes('strike') || cls.includes('origin') || cls.includes('before') || cls.includes('prev');
+            if (p >= 3000 && p <= 10000000 && !isOldPrice) allRub.push({ val: p, cls: el.className?.slice(0,50) });
             }
           }
         }
