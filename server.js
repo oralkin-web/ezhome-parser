@@ -194,6 +194,28 @@ async function parsePage(url, debug = false) {
           }
         }
       }
+      // Умный парсинг размеров по словам (Ширина/Глубина/Высота/Длина)
+      if (!size) {
+        const dimMap = {};
+        const dimPatterns = [
+          [/(?:ширина|width)[,:\s]+(\d+)/gi, 'w'],
+          [/(?:глубина|depth)[,:\s]+(\d+)/gi, 'd'],
+          [/(?:высота|height)[,:\s]+(\d+)/gi, 'h'],
+          [/(?:длина|length)[,:\s]+(\d+)/gi, 'l'],
+        ];
+        for (const [re, key] of dimPatterns) {
+          const m = sizeSearch.match(re);
+          if (m) {
+            const val = parseInt(m[0].match(/(\d+)/)[1]);
+            if (val >= 10 && val <= 500) dimMap[key] = val;
+          }
+        }
+        if (dimMap.w && dimMap.d && dimMap.h) size = `${dimMap.w}x${dimMap.d}x${dimMap.h}`;
+        else if (dimMap.l && dimMap.w && dimMap.h) size = `${dimMap.l}x${dimMap.w}x${dimMap.h}`;
+        else if (dimMap.w && dimMap.h) size = `${dimMap.w}x${dimMap.h}`;
+        else if (dimMap.l && dimMap.h) size = `${dimMap.l}x${dimMap.h}`;
+      }
+
       // Fallback из названия
       if (!size && name) {
         for (const p of sizePatterns) {
