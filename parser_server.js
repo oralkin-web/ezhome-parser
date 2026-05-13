@@ -119,6 +119,13 @@ async function parsePage(url, debug = false) {
             });
         for (const el of els) {
           const allowChildren = isTestId;
+          // Сначала пробуем атрибут content (divan.ru itemprop="price")
+          const contentAttr = el.getAttribute('content');
+          if (contentAttr && /^\d+$/.test(contentAttr.trim())) {
+            const p = parseInt(contentAttr.trim());
+            if (p >= 1000 && p <= 10000000) cssFound.push({ sel, text: contentAttr, val: p });
+            continue;
+          }
           if ((allowChildren || el.children.length === 0) && /\d/.test(el.innerText)) {
             const m = el.innerText.replace(/руб\.?/g, '₽').match(/(\d[\d\s]{2,10})/);
             if (m) {

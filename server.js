@@ -119,6 +119,13 @@ async function parsePage(url, debug = false) {
             });
         for (const el of els) {
           const allowChildren = isTestId;
+          // Сначала пробуем атрибут content (divan.ru itemprop="price")
+          const contentAttr = el.getAttribute('content');
+          if (contentAttr && /^\d+$/.test(contentAttr.trim())) {
+            const p = parseInt(contentAttr.trim());
+            if (p >= 1000 && p <= 10000000) cssFound.push({ sel, text: contentAttr, val: p });
+            continue;
+          }
           if ((allowChildren || el.children.length === 0) && /\d/.test(el.innerText)) {
             const m = el.innerText.replace(/руб\.?/g, '₽').match(/(\d[\d\s]{2,10})/);
             if (m) {
@@ -202,9 +209,6 @@ async function parsePage(url, debug = false) {
 
       // 1. Паттерны ШхГхВ из твоего списка
       const namedPatterns = [
-        // Divan.ru: "Длина 272 см x Ширина 112 см x Высота 83 см"
-        /длина\s+(\d{2,3})\s*см\s*x\s*ширина\s+(\d{2,3})\s*см\s*x\s*высота\s+(\d{2,3})\s*см/i,
-        /длина\s+(\d{2,3})\s*x\s*ширина\s+(\d{2,3})\s*x\s*высота\s+(\d{2,3})/i,
         // ШхГхВ формат: 140х80х90
         /(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*см/i,
         /(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*[xхх×]\s*(\d{2,3})/i,
@@ -306,14 +310,6 @@ async function parsePage(url, debug = false) {
         for (const p of strictPatterns) {
           const m = bodyText.match(p);
           if (m && !isColorGarbage(m[1])) { color = m[1].trim().slice(0, 60); break; }
-        }
-      }
-      // Ткань из строки "Ткань 1: Ультра Серый велюр" на divan.ru
-      if (!color) {
-        const fabricLine = bodyText.match(/ткань\s*\d*\s*:\s*[^\n]{3,60}/i);
-        if (fabricLine) {
-          const fabricVal = fabricLine[0].replace(/ткань\s*\d*\s*:\s*/i, '').trim();
-          if (!isColorGarbage(fabricVal)) color = fabricVal.slice(0, 60);
         }
       }
       if (!color) {
