@@ -1,397 +1,509 @@
 const express = require('express');
-const { chromium } = require('playwright-core');
-const Browserbase = require('@browserbasehq/sdk');
+const session = require('express-session');
+const bcrypt = require('bcryptjs');
+const { v4: uuidv4 } = require('uuid');
+const { Pool } = require('pg');
+const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
+const ADMIN_EMAIL = 'oralkin@gmail.com';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-app.use(express.json());
-app.use(express.static('public'));
+async function sendEmail(subject, html) {
+  await sendEmailTo(ADMIN_EMAIL, subject, html);
+}
 
-const bb = new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY });
-
-async function parsePage(url, debug = false) {
-  let browser;
+async function sendEmailTo(to, subject, html) {
+  if (!RESEND_API_KEY) return;
   try {
-    // Прокси только для сайтов с защитой
-    const PROXY_SITES = ['hoff.ru', 'divan.ru'];
-    const needsProxy = PROXY_SITES.some(site => url.includes(site));
-
-    const session = await bb.sessions.create({
-      projectId: process.env.BROWSERBASE_PROJECT_ID,
-      ...(needsProxy ? { proxies: true } : {}),
-      browserSettings: { stealth: true }
+    await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'ezhome <feedback@ezhome.design>',
+        to,
+        subject,
+        html
+      })
     });
-
-    browser = await chromium.connectOverCDP(session.connectUrl);
-    const context = browser.contexts()[0];
-    const page = context.pages()[0];
-
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-    });
-
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-    try {
-      await page.waitForSelector(
-        '[data-testid="price"],[class*="price__current"],[class*="price_current"],[itemprop="price"],[class*="price__value"],[class*="product__price"]',
-        { timeout: 5000 }
-      );
-    } catch(e) {}
-
-    // Закрываем попапы
-    try {
-      const buttons = await page.$$('button');
-      for (const btn of buttons) {
-        const text = await btn.innerText().catch(() => '');
-        if (text.includes('Да') || text.includes('верно') || text.includes('Принять')) {
-          await btn.click({ force: true });
-          break;
-        }
-      }
-    } catch(e) {}
-    try { await page.keyboard.press('Escape'); } catch(e) {}
-    await page.waitForTimeout(1000);
-
-    const result = await page.evaluate((isDebug) => {
-      const GARBAGE = [
-        'на фото может', 'может отличаться', 'реального изделия', 'представленного на фото',
-        'выдерживает', 'эксплуатацию', 'особенностей', 'изображениях', 'фотографий',
-        'отправим', 'мессенджер', 'доставка', 'оплата', 'подробнее', 'добавить',
-        'корзину', 'купить', 'заказать', 'наличии', 'популярные', 'запросы', 'обивки:',
-        'на сайте могут', 'от реальных', 'изображени', 'фотограф'
-      ];
-      const isGarbage = (s) => !s || s.trim().length < 2 || GARBAGE.some(g => s.toLowerCase().includes(g));
-      const isColorGarbage = (s) => !s || /^[\d\s\+\-]+$/.test(s.trim()) || /^\(\d+\)$/.test(s.trim()) || isGarbage(s);
-
-      // JSON-LD
-      let jsonld = null;
-      try {
-        for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
-          const d = JSON.parse(s.textContent);
-          const prod = d['@type'] === 'Product' ? d :
-            (Array.isArray(d) ? d.find(x => x['@type'] === 'Product') : null);
-          if (prod) { jsonld = prod; break; }
-        }
-      } catch(e) {}
-
-      const bodyText = document.body.innerText;
-
-      // ── НАЗВАНИЕ ──
-      const name =
-        document.querySelector('h1')?.innerText?.trim() ||
-        document.querySelector('[class*="product-title"],[class*="product__title"],[class*="goods-title"]')?.innerText?.trim() ||
-        document.title.split(/[–—|·]/)[0].trim();
-
-      // ── ЦЕНА — только в верхних 800px страницы ──
-      const debugPrices = [];
-      let price = null;
-
-      const priceSelectors = [
-        '[data-testid="price"]','[data-test="price"]','[data-qa="price"]',
-        '[class*="price__current"]','[class*="price_current"]','[class*="price-current"]',
-        '[class*="price__value"]','[class*="price-value"]','[class*="priceValue"]',
-        '[class*="product__price"]','[class*="productPrice"]','[class*="product-price"]',
-        '[itemprop="price"]','[class*="offer__price"]','[class*="item-price"]',
-        '[class*="main-price"]','[class*="actual-price"]','[class*="final-price"]',
-        '[class*="price__number"]','[class*="price__amount"]','[class*="price__sale"]',
-        '[class*="price__new"]',
-      ];
-      const cssFound = [];
-      for (const sel of priceSelectors) {
-        const isTestId = sel.includes('data-testid') || sel.includes('data-test') || sel.includes('data-qa');
-        // Для data-testid берём первый элемент в верхних 800px
-        const els = isTestId
-          ? [document.querySelector(sel)].filter(Boolean)
-          : [...document.querySelectorAll(sel)].filter(el => {
-              const rect = el.getBoundingClientRect();
-              return rect.top < 800; // только первый экран
-            });
-        for (const el of els) {
-          const allowChildren = isTestId;
-          if ((allowChildren || el.children.length === 0) && /\d/.test(el.innerText)) {
-            const m = el.innerText.replace(/руб\.?/g, '₽').match(/(\d[\d\s]{2,10})/);
-            if (m) {
-              const p = parseInt(m[1].replace(/\s/g, ''));
-              if (p >= 1000 && p <= 10000000) cssFound.push({ sel, text: el.innerText.trim(), val: p });
-            }
-          }
-        }
-        if (cssFound.length > 0) break;
-      }
-      if (isDebug) debugPrices.push({ source: 'css', found: cssFound });
-      const cssVals = cssFound.map(x => x.val).filter(p => p >= 3000);
-      if (cssVals.length > 0) price = cssVals[0];
-
-      // JSON-LD
-      if (!price && jsonld?.offers) {
-        const offers = Array.isArray(jsonld.offers) ? jsonld.offers[0] : jsonld.offers;
-        const p = parseFloat(String(offers?.price || '').replace(/\s/g, ''));
-        if (p >= 1000 && p <= 10000000) price = p;
-      }
-
-      // Fallback — ₽ только в верхних 800px
-      if (!price) {
-        const allRub = [];
-        for (const el of document.querySelectorAll('*')) {
-          const rect = el.getBoundingClientRect();
-          if (rect.top > 800) continue;
-          if (el.children.length === 0 && /[\d\s]{3,12}[₽]|[\d\s]{3,12}руб/.test(el.innerText)) {
-            const m = el.innerText.replace(/руб\.?/g, '₽').match(/(\d[\d\s]{2,10})/);
-            if (m) {
-              const p = parseInt(m[1].replace(/\s/g, ''));
-              const cls = (el.className || '').toLowerCase();
-              const isOld = cls.includes('old') || cls.includes('cross') || cls.includes('strike') || cls.includes('origin') || cls.includes('before') || cls.includes('prev');
-              if (p >= 3000 && p <= 10000000 && !isOld) allRub.push({ val: p });
-            }
-          }
-        }
-        allRub.sort((a, b) => b.val - a.val);
-        if (isDebug) debugPrices.push({ source: 'rub_top800', top5: allRub.slice(0,5) });
-        if (allRub.length > 0) price = allRub[0].val;
-      }
-
-      // Евро
-      if (!price) {
-        const m = bodyText.match(/([\d.,]+)\s*€/) || bodyText.match(/€\s*([\d.,]+)/);
-        if (m) {
-          const p = parseFloat(m[1].replace(/\./g, '').replace(',', '.'));
-          if (p >= 10 && p <= 100000) price = p;
-        }
-      }
-
-      // ── РАЗМЕР ──
-      let size = null;
-
-      // Ищем блок характеристик по заголовку
-      let specBlock = '';
-      const headings = [...document.querySelectorAll('h2,h3,h4,th,dt,[class*="title"],[class*="heading"]')];
-      for (const h of headings) {
-        const t = h.innerText?.toLowerCase() || '';
-        if (t.includes('характеристик') || t.includes('параметр') || t.includes('габарит') || t.includes('размер')) {
-          // Берём текст следующего блока
-          let next = h.nextElementSibling;
-          for (let i = 0; i < 5 && next; i++) {
-            specBlock += next.innerText + '\n';
-            next = next.nextElementSibling;
-          }
-          // Также берём родительский блок
-          if (h.parentElement) specBlock += h.parentElement.innerText + '\n';
-          break;
-        }
-      }
-
-      // Также стандартные блоки характеристик
-      const specElText = [...document.querySelectorAll(
-        '[class*="spec"],[class*="param"],[class*="char"],[class*="dimension"],[class*="feature"],' +
-        '[class*="detail"][class*="table"],[class*="detailtable"],[class*="properties"],[class*="attrs"],' +
-        '[class*="technical"],[class*="info-table"],[class*="product-info"]'
-      )].map(el => el.innerText).join('\n');
-
-      const sizeSearch = specBlock + '\n' + specElText + '\n' + bodyText;
-
-      // 1. Паттерны ШхГхВ из твоего списка
-      const namedPatterns = [
-        // ШхГхВ формат: 140х80х90
-        /(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*см/i,
-        /(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*[xхх×]\s*(\d{2,3})/i,
-        /(\d{2,3})\s*[xхх×]\s*(\d{2,3})\s*см/i,
-        /(\d{2,3})\s*[xхх×]\s*(\d{2,3})/i,
-        // Диаметр
-        /диаметр[:\s]*(\d+[\d,.]*)\s*см/i,
-        /ø\s*([1-9]\d{0,2}[\d,.]*)/i,
-      ];
-
-      for (const p of namedPatterns) {
-        const m = sizeSearch.match(p);
-        if (m) {
-          const nums = [m[1], m[2], m[3]].filter(Boolean).map(Number);
-          if (nums.every(n => n >= 10 && n <= 500)) {
-            if (nums.length === 3) size = `${nums[0]}x${nums[1]}x${nums[2]}`;
-            else if (nums.length === 2) size = `${nums[0]}x${nums[1]}`;
-            else size = `⌀${nums[0]}`;
-            break;
-          }
-        }
-      }
-
-      // 2. Собираем Ширину/Глубину/Высоту по словам из списка
-      if (!size) {
-        const dimMap = {};
-
-        // Паттерны поиска из твоего списка
-        const dimKeywords = [
-          { keys: ['ширина', 'габаритная ширина', 'шир', 'width', 'w'], dim: 'w' },
-          { keys: ['глубина', 'габаритная глубина', 'глуб', 'depth', 'г'], dim: 'd' },
-          { keys: ['высота', 'габаритная высота', 'выс', 'height', 'в'], dim: 'h' },
-          { keys: ['длина', 'length', 'д'], dim: 'l' },
-        ];
-
-        for (const { keys, dim } of dimKeywords) {
-          for (const key of keys) {
-            // Ищем "Ширина, см\n53" или "Ширина: 53" или "Ширина 53 см"
-            const re = new RegExp(key + '[,:\\s,см]+([\\d]+)', 'i');
-            const m = sizeSearch.match(re);
-            if (m) {
-              const val = parseInt(m[1]);
-              if (val >= 10 && val <= 500) { dimMap[dim] = val; break; }
-            }
-          }
-        }
-
-        // Собираем размер
-        if (dimMap.w && dimMap.d && dimMap.h) size = `${dimMap.w}x${dimMap.d}x${dimMap.h}`;
-        else if (dimMap.l && dimMap.w && dimMap.h) size = `${dimMap.l}x${dimMap.w}x${dimMap.h}`;
-        else if (dimMap.w && dimMap.h) size = `${dimMap.w}x${dimMap.h}`;
-        else if (dimMap.l && dimMap.h) size = `${dimMap.l}x${dimMap.h}`;
-        else if (dimMap.w && dimMap.d) size = `${dimMap.w}x${dimMap.d}`;
-      }
-
-      // 3. Fallback из названия
-      if (!size && name) {
-        for (const p of namedPatterns) {
-          const m = name.match(p);
-          if (m) {
-            const nums = [m[1], m[2], m[3]].filter(Boolean).map(Number);
-            if (nums.every(n => n >= 10 && n <= 500)) {
-              if (nums.length === 3) size = `${nums[0]}x${nums[1]}x${nums[2]}`;
-              else if (nums.length === 2) size = `${nums[0]}x${nums[1]}`;
-              else size = `⌀${nums[0]}`;
-              break;
-            }
-          }
-        }
-      }
-
-      // ── ЦВЕТ ──
-      let color = null;
-      if (jsonld?.color && !isColorGarbage(jsonld.color)) color = jsonld.color.trim().slice(0, 60);
-      if (!color) {
-        const colorEls = [...document.querySelectorAll('[class*="color"],[class*="colour"],[class*="Color"]')]
-          .filter(el => el.children.length === 0 && el.innerText.trim().length >= 2 && el.innerText.trim().length <= 40 && !isColorGarbage(el.innerText));
-        if (colorEls.length > 0) color = colorEls[0].innerText.trim();
-      }
-      if (!color) {
-        const activeColor = document.querySelector(
-          '[class*="active"][class*="color"],[class*="selected"][class*="color"],' +
-          '[class*="color"][class*="active"],[class*="color"][class*="selected"],' +
-          '[class*="swatch"][class*="active"],[class*="chip"][class*="active"]'
-        );
-        if (activeColor) {
-          const t = activeColor.innerText?.trim() || activeColor.getAttribute('title') || activeColor.getAttribute('data-name');
-          if (t && !isColorGarbage(t)) color = t.slice(0, 60);
-        }
-      }
-      if (!color) {
-        const strictPatterns = [
-          /(?:^|\n)\s*цвет\s*[:\-]?\s*([^\n]{2,40})/im,
-          /(?:^|\n)\s*обивка\s*[:\-]?\s*([^\n]{2,40})/im,
-          /(?:^|\n)\s*покрытие\s*[:\-]?\s*([^\n]{2,40})/im,
-          /(?:^|\n)\s*colour\s*[:\-]?\s*([^\n]{2,40})/im,
-          /(?:^|\n)\s*color\s*[:\-]?\s*([^\n]{2,40})/im,
-        ];
-        for (const p of strictPatterns) {
-          const m = bodyText.match(p);
-          if (m && !isColorGarbage(m[1])) { color = m[1].trim().slice(0, 60); break; }
-        }
-      }
-      if (!color) {
-        const m = bodyText.match(/\b(велюр|бархат|экокожа|рогожка|шенилл|флок|текстиль|букле|лён|замша)\b[^\n,\.;]{0,25}/i);
-        if (m && !isColorGarbage(m[0])) color = m[0].trim().slice(0, 60);
-      }
-      if (!color && name) {
-        const afterSize = name.match(/\d+[x×хх][\d×хх\d]+\s+([А-ЯЁа-яёA-Za-z][^\d\n,\.]{1,40})/i);
-        if (afterSize && !isColorGarbage(afterSize[1])) color = afterSize[1].trim().slice(0, 60);
-      }
-      if (!color && name) {
-        const basicColors = name.match(/\b(чёрный|черный|белый|серый|бежевый|коричневый|синий|зеленый|зелёный|красный|розовый|голубой|жёлтый|желтый|оранжевый|фиолетовый|золотой|серебристый|латте|капучино|мокко|антрацит|графит|слоновая)\b/i);
-        if (basicColors) color = basicColors[0].trim();
-      }
-      // Ткань/материал из скобок в названии: "Пуф Аура (ткань Teddy 33)" → "ткань Teddy 33"
-      if (!color && name) {
-        const inParens = name.match(/\(([^)]{3,50})\)/);
-        if (inParens && !isColorGarbage(inParens[1])) color = inParens[1].trim().slice(0, 60);
-      }
-
-      // ── ФОТО ──
-      let image_url = document.querySelector('meta[property="og:image"]')?.content ||
-        document.querySelector('meta[name="og:image"]')?.content || null;
-      if (image_url && (image_url.includes('.svg') || image_url.includes('favicon') || image_url.includes('logo') || image_url.includes('photo_image') || image_url.includes('no_photo') || image_url.includes('no-photo') || image_url.includes('noimage') || image_url.includes('placeholder'))) image_url = null;
-
-      if (!image_url && jsonld?.image) {
-        const img = Array.isArray(jsonld.image) ? jsonld.image[0] : jsonld.image;
-        if (typeof img === 'string' && img.startsWith('http') && !img.includes('.svg')) image_url = img;
-        else if (img?.url) image_url = img.url;
-      }
-
-      // Карусель/галерея — первое фото товара
-      if (!image_url) {
-        const carouselImg = document.querySelector(
-          '[class*="carousel"] img,[class*="gallery"] img,[class*="slider"] img,' +
-          '[class*="swiper"] img,[class*="product-image"] img,[class*="productImage"] img,' +
-          '[class*="product__image"] img,[class*="product-photo"] img'
-        );
-        if (carouselImg) {
-          const src = carouselImg.src || carouselImg.currentSrc || carouselImg.dataset.src;
-          if (src && src.startsWith('http') && !src.includes('.svg') && !src.includes('logo')) image_url = src;
-        }
-      }
-
-      if (!image_url) {
-        const imgs = [...document.querySelectorAll('img')]
-          .map(i => ({ src: i.src||i.currentSrc, w: i.naturalWidth, h: i.naturalHeight, alt: (i.alt||'').toLowerCase(), src_lower: (i.src||'').toLowerCase() }))
-          .filter(i => i.src && i.src.startsWith('http') && !i.src.includes('.svg') && !i.src.includes('favicon') && i.w > 300 && i.h > 300 && !i.alt.includes('logo') && !i.src_lower.includes('logo') && !i.src_lower.includes('icon') && !i.src_lower.includes('banner'))
-          .sort((a, b) => (b.w * b.h) - (a.w * a.h));
-        if (imgs.length > 0) image_url = imgs[0].src;
-      }
-
-      if (!image_url) {
-        const lazy = [...document.querySelectorAll('img[data-src],img[data-lazy],img[data-original]')]
-          .map(i => i.dataset.src || i.dataset.lazy || i.dataset.original)
-          .filter(s => s && s.startsWith('http') && !s.includes('logo') && !s.includes('.svg'))[0];
-        if (lazy) image_url = lazy;
-      }
-
-      if (isDebug) return { name, price, size, color, image_url, _debug: { prices: debugPrices } };
-      return { name, price, size, color, image_url };
-    }, debug);
-
-    await browser.close();
-    return { ok: true, ...result, url };
   } catch (e) {
-    console.error('Ошибка:', e.message);
-    if (browser) await browser.close().catch(() => {});
-    return { ok: false, error: e.message, url };
+    console.error('Email error:', e.message);
   }
 }
 
-app.post('/parse', async (req, res) => {
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: 'URL обязателен' });
-  console.log('Парсю:', url);
-  const start = Date.now();
-  const result = await parsePage(url, false);
-  result.time_ms = Date.now() - start;
-  console.log('Готово за', result.time_ms, 'мс:', result.name);
-  res.json(result);
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      name TEXT NOT NULL,
+      phone TEXT DEFAULT '',
+      site TEXT DEFAULT '',
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS projects (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      name TEXT NOT NULL,
+      client TEXT DEFAULT '',
+      status TEXT DEFAULT 'active',
+      slug TEXT UNIQUE NOT NULL,
+      comment TEXT DEFAULT '',
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS items (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      room TEXT NOT NULL,
+      name TEXT NOT NULL,
+      url TEXT DEFAULT '',
+      img TEXT DEFAULT '',
+      size TEXT DEFAULT '',
+      price NUMERIC DEFAULT 0,
+      qty INTEGER DEFAULT 1,
+      cmt TEXT DEFAULT '',
+      sort_order INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS feedback (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      text TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+  await pool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS comment TEXT DEFAULT ''`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS logo TEXT DEFAULT ''`);
+  console.log('DB initialized');
+}
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, '../public')));
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'ezhome-secret-2024',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 }
+}));
+
+const auth = (req, res, next) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
+  next();
+};
+
+const adminAuth = async (req, res, next) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
+  // Проверяем email из базы — не из сессии, чтобы старые сессии тоже работали
+  try {
+    const r = await pool.query('SELECT email FROM users WHERE id=$1', [req.session.userId]);
+    if (!r.rows.length || r.rows[0].email !== ADMIN_EMAIL) return res.status(403).json({ error: 'Forbidden' });
+    next();
+  } catch(e) {
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
+// AUTH
+const INVITE_TOKEN = process.env.INVITE_TOKEN || 'ezhome-beta-2024';
+const MAX_USERS = 15;
+
+// Проверка инвайт-токена
+app.get('/invite/:token', (req, res) => {
+  if (req.params.token !== INVITE_TOKEN) return res.status(404).send('<h1>Ссылка недействительна</h1>');
+  res.sendFile(require('path').join(__dirname, '../public/index.html'));
 });
 
-app.post('/debug', async (req, res) => {
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: 'URL обязателен' });
-  const result = await parsePage(url, true);
-  res.json(result);
+app.post('/api/register', async (req, res) => {
+  const { email, password, name, invite } = req.body;
+  if (invite !== INVITE_TOKEN) return res.status(403).json({ error: 'Неверная ссылка для регистрации' });
+  if (!email || !password || !name) return res.status(400).json({ error: 'Все поля обязательны' });
+  const count = await pool.query('SELECT COUNT(*) FROM users');
+  if (parseInt(count.rows[0].count) >= MAX_USERS) return res.status(403).json({ error: 'Достигнут лимит участников' });
+  const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
+  if (existing.rows.length) return res.status(400).json({ error: 'Email уже зарегистрирован' });
+  const hash = bcrypt.hashSync(password, 10);
+  const id = uuidv4();
+  await pool.query('INSERT INTO users (id, email, password, name) VALUES ($1, $2, $3, $4)', [id, email.toLowerCase(), hash, name]);
+  req.session.userId = id;
+  req.session.userEmail = email.toLowerCase();
+  res.json({ ok: true });
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
-app.listen(PORT, () => console.log(`ezhome-parser запущен на порту ${PORT}`));
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+  const result = await pool.query('SELECT * FROM users WHERE email = $1', [email?.toLowerCase()]);
+  const user = result.rows[0];
+  if (!user || !bcrypt.compareSync(password, user.password)) return res.status(401).json({ error: 'Неверный email или пароль' });
+  req.session.userId = user.id;
+  req.session.userEmail = user.email;
+  res.json({ ok: true });
+});
+
+app.post('/api/logout', (req, res) => { req.session.destroy(); res.json({ ok: true }); });
+
+app.get('/api/me', auth, async (req, res) => {
+  const r = await pool.query('SELECT id, email, name, phone, site, logo FROM users WHERE id = $1', [req.session.userId]);
+  const user = r.rows[0];
+  user.isAdmin = user.email === ADMIN_EMAIL;
+  res.json(user);
+});
+
+app.put('/api/me', auth, async (req, res) => {
+  const { name, phone, site, logo } = req.body;
+  await pool.query('UPDATE users SET name=$1, phone=$2, site=$3, logo=$4 WHERE id=$5', [name, phone, site, logo||'', req.session.userId]);
+  res.json({ ok: true });
+});
+
+// FEEDBACK
+app.post('/api/feedback', auth, async (req, res) => {
+  const { text } = req.body;
+  if (!text || !text.trim()) return res.status(400).json({ error: 'Текст обязателен' });
+  const id = uuidv4();
+  await pool.query('INSERT INTO feedback (id, user_id, text) VALUES ($1, $2, $3)', [id, req.session.userId, text.trim()]);
+  const userR = await pool.query('SELECT name, email FROM users WHERE id=$1', [req.session.userId]);
+  const user = userR.rows[0];
+  const date = new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+  await sendEmail(
+    `Новый отзыв от ${user.name}`,
+    `<p><b>${user.name}</b> (${user.email})</p><p>${date}</p><hr><p style="font-size:16px">${text.trim().replace(/\n/g, '<br>')}</p>`
+  );
+  res.json({ ok: true });
+});
+
+
+app.get('/api/feedback/mine', auth, async (req, res) => {
+  const r = await pool.query(
+    'SELECT id, text, created_at FROM feedback WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20',
+    [req.session.userId]
+  );
+  res.json(r.rows);
+});
+
+app.get('/api/feedback', adminAuth, async (req, res) => {
+  const r = await pool.query(`
+    SELECT f.*, u.name as user_name, u.email as user_email
+    FROM feedback f JOIN users u ON u.id = f.user_id
+    ORDER BY f.created_at DESC
+  `);
+  res.json(r.rows);
+});
+
+
+
+// ADMIN PAGE
+app.get('/admin', adminAuth, (req, res) => {
+  res.sendFile(require('path').join(__dirname, '../public/admin.html'));
+});
+
+app.get('/api/admin/invite-url', adminAuth, (req, res) => {
+  const base = process.env.APP_URL || 'https://app.ezhome.design';
+  res.json({ url: base + '/invite/' + INVITE_TOKEN });
+});
+
+// ADMIN — список пользователей и сброс пароля
+app.get('/api/admin/users', adminAuth, async (req, res) => {
+  const r = await pool.query(`
+    SELECT u.id, u.email, u.name, u.created_at,
+           COUNT(f.id)::int as feedback_count
+    FROM users u
+    LEFT JOIN feedback f ON f.user_id = u.id
+    WHERE u.email != $1
+    GROUP BY u.id
+    ORDER BY u.created_at ASC
+  `, [ADMIN_EMAIL]);
+  res.json(r.rows);
+});
+
+app.post('/api/admin/reset-password', adminAuth, async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId обязателен' });
+  const r = await pool.query('SELECT email, name FROM users WHERE id=$1', [userId]);
+  if (!r.rows.length) return res.status(404).json({ error: 'Пользователь не найден' });
+  const user = r.rows[0];
+  // Генерируем временный пароль
+  const tmpPass = Math.random().toString(36).slice(2, 10);
+  const hash = bcrypt.hashSync(tmpPass, 10);
+  await pool.query('UPDATE users SET password=$1 WHERE id=$2', [hash, userId]);
+  // Отправляем пользователю
+  await sendEmailTo(user.email, 'Новый пароль — ezhome.design',
+    `<p>Привет, ${user.name}!</p><p>Твой временный пароль: <b style="font-size:18px">${tmpPass}</b></p><p>Войди на <a href="https://app.ezhome.design">app.ezhome.design</a> и смени пароль в настройках.</p>`
+  );
+  res.json({ ok: true, tmpPass });
+});
+
+
+
+
+app.delete('/api/admin/users/:id', adminAuth, async (req, res) => {
+  const { id } = req.params;
+  // Не даём удалить самого себя
+  const r = await pool.query('SELECT email FROM users WHERE id=$1', [id]);
+  if (!r.rows.length) return res.status(404).json({ error: 'Не найдено' });
+  if (r.rows[0].email === ADMIN_EMAIL) return res.status(403).json({ error: 'Нельзя удалить администратора' });
+  await pool.query('DELETE FROM feedback WHERE user_id=$1', [id]);
+  await pool.query('DELETE FROM items WHERE project_id IN (SELECT id FROM projects WHERE user_id=$1)', [id]);
+  await pool.query('DELETE FROM projects WHERE user_id=$1', [id]);
+  await pool.query('DELETE FROM users WHERE id=$1', [id]);
+  res.json({ ok: true });
+});
+
+// PROJECTS
+app.get('/api/projects', auth, async (req, res) => {
+  const r = await pool.query(`
+    SELECT p.*, COUNT(i.id) as item_count, COALESCE(SUM(i.price * i.qty), 0) as total
+    FROM projects p LEFT JOIN items i ON i.project_id = p.id
+    WHERE p.user_id = $1
+    GROUP BY p.id ORDER BY p.updated_at DESC
+  `, [req.session.userId]);
+  res.json(r.rows);
+});
+
+app.post('/api/projects', auth, async (req, res) => {
+  const { name, client } = req.body;
+  if (!name) return res.status(400).json({ error: 'Название обязательно' });
+  const id = uuidv4(), slug = uuidv4().slice(0, 8);
+  await pool.query('INSERT INTO projects (id, user_id, name, client, slug) VALUES ($1, $2, $3, $4, $5)', [id, req.session.userId, name, client || '', slug]);
+  res.json({ id, slug });
+});
+
+app.put('/api/projects/:id', auth, async (req, res) => {
+  const { name, client, status } = req.body;
+  const r = await pool.query('SELECT id FROM projects WHERE id=$1 AND user_id=$2', [req.params.id, req.session.userId]);
+  if (!r.rows.length) return res.status(404).json({ error: 'Не найдено' });
+  await pool.query('UPDATE projects SET name=$1, client=$2, status=$3, updated_at=NOW() WHERE id=$4', [name, client, status, req.params.id]);
+  res.json({ ok: true });
+});
+
+app.put('/api/projects/:id/comment', auth, async (req, res) => {
+  const { comment } = req.body;
+  const r = await pool.query('SELECT id FROM projects WHERE id=$1 AND user_id=$2', [req.params.id, req.session.userId]);
+  if (!r.rows.length) return res.status(404).json({ error: 'Не найдено' });
+  await pool.query('UPDATE projects SET comment=$1, updated_at=NOW() WHERE id=$2', [comment || '', req.params.id]);
+  res.json({ ok: true });
+});
+
+app.delete('/api/projects/:id', auth, async (req, res) => {
+  const r = await pool.query('SELECT id FROM projects WHERE id=$1 AND user_id=$2', [req.params.id, req.session.userId]);
+  if (!r.rows.length) return res.status(404).json({ error: 'Не найдено' });
+  await pool.query('DELETE FROM items WHERE project_id=$1', [req.params.id]);
+  await pool.query('DELETE FROM projects WHERE id=$1', [req.params.id]);
+  res.json({ ok: true });
+});
+
+app.post('/api/projects/:id/duplicate', auth, async (req, res) => {
+  const r = await pool.query('SELECT * FROM projects WHERE id=$1 AND user_id=$2', [req.params.id, req.session.userId]);
+  if (!r.rows.length) return res.status(404).json({ error: 'Не найдено' });
+  const p = r.rows[0];
+  const newId = uuidv4(), newSlug = uuidv4().slice(0, 8);
+  await pool.query('INSERT INTO projects (id, user_id, name, client, slug, status, comment) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+    [newId, req.session.userId, 'Копия — ' + p.name, p.client, newSlug, 'active', p.comment || '']);
+  const items = await pool.query('SELECT * FROM items WHERE project_id=$1', [p.id]);
+  for (const it of items.rows) {
+    await pool.query('INSERT INTO items (id, project_id, room, name, url, img, size, price, qty, cmt, sort_order) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
+      [uuidv4(), newId, it.room, it.name, it.url, it.img, it.size, it.price, it.qty, it.cmt, it.sort_order]);
+  }
+  res.json({ id: newId, slug: newSlug });
+});
+
+// ITEMS
+app.get('/api/projects/:id/items', auth, async (req, res) => {
+  const r = await pool.query('SELECT id FROM projects WHERE id=$1 AND user_id=$2', [req.params.id, req.session.userId]);
+  if (!r.rows.length) return res.status(404).json({ error: 'Не найдено' });
+  const items = await pool.query('SELECT * FROM items WHERE project_id=$1 ORDER BY sort_order, room, id', [req.params.id]);
+  res.json(items.rows);
+});
+
+app.post('/api/projects/:id/items', auth, async (req, res) => {
+  const r = await pool.query('SELECT id FROM projects WHERE id=$1 AND user_id=$2', [req.params.id, req.session.userId]);
+  if (!r.rows.length) return res.status(404).json({ error: 'Не найдено' });
+  const { room, name, url, img, size, price, qty, cmt } = req.body;
+  if (!name) return res.status(400).json({ error: 'Название обязательно' });
+  const id = uuidv4();
+  const maxOrder = await pool.query('SELECT MAX(sort_order) as m FROM items WHERE project_id=$1', [req.params.id]);
+  const order = (maxOrder.rows[0].m || 0) + 1;
+  await pool.query('INSERT INTO items (id, project_id, room, name, url, img, size, price, qty, cmt, sort_order) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
+    [id, req.params.id, room, name, url||'', img||'', size||'', price||0, qty||1, cmt||'', order]);
+  await pool.query('UPDATE projects SET updated_at=NOW() WHERE id=$1', [req.params.id]);
+  res.json({ id });
+});
+
+app.put('/api/items/:id', auth, async (req, res) => {
+  const r = await pool.query('SELECT i.id, p.user_id FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=$1', [req.params.id]);
+  if (!r.rows.length || r.rows[0].user_id !== req.session.userId) return res.status(404).json({ error: 'Не найдено' });
+  const { room, name, url, img, size, price, qty, cmt } = req.body;
+  await pool.query('UPDATE items SET room=$1, name=$2, url=$3, img=$4, size=$5, price=$6, qty=$7, cmt=$8 WHERE id=$9',
+    [room, name, url||'', img||'', size||'', price||0, qty||1, cmt||'', req.params.id]);
+  res.json({ ok: true });
+});
+
+app.delete('/api/items/:id', auth, async (req, res) => {
+  const r = await pool.query('SELECT i.id, p.user_id FROM items i JOIN projects p ON p.id=i.project_id WHERE i.id=$1', [req.params.id]);
+  if (!r.rows.length || r.rows[0].user_id !== req.session.userId) return res.status(404).json({ error: 'Не найдено' });
+  await pool.query('DELETE FROM items WHERE id=$1', [req.params.id]);
+  res.json({ ok: true });
+});
+
+// PUBLIC CLIENT PAGE
+app.get('/p/:slug', async (req, res) => {
+  const r = await pool.query(`
+    SELECT p.*, u.name as designer_name, u.phone as designer_phone, u.email as designer_email, u.site as designer_site, u.logo as designer_logo
+    FROM projects p JOIN users u ON u.id=p.user_id WHERE p.slug=$1
+  `, [req.params.slug]);
+  if (!r.rows.length) return res.status(404).send('<h1>Страница не найдена</h1>');
+  const project = r.rows[0];
+  const items = await pool.query('SELECT * FROM items WHERE project_id=$1 ORDER BY sort_order, room, id', [project.id]);
+  res.send(buildClientPage(project, items.rows));
+});
+
+function buildClientPage(project, items) {
+  const ROOM_ORDER = ["Гостиная","Кухня","Спальня","Прихожая","Детская","Ванная","Кабинет","Свет"];
+  const grp = {};
+  items.forEach(i => { (grp[i.room] = grp[i.room] || []).push(i); });
+  const rooms = [...ROOM_ORDER, ...Object.keys(grp).filter(r => !ROOM_ORDER.includes(r))].filter(r => grp[r]);
+  const grand = items.reduce((s, i) => s + Number(i.price) * i.qty, 0);
+  const roomTot = {};
+  rooms.forEach(r => { roomTot[r] = grp[r].reduce((s, i) => s + Number(i.price) * i.qty, 0); });
+  const date = new Date().toLocaleDateString('ru-RU');
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const fmt = n => Number(n).toLocaleString('ru-RU') + '\u202f₽';
+  const projectTitle = project.client || project.name;
+  const comment = project.comment || '';
+
+  const summaryCards = rooms.map(r => roomTot[r] ? `
+    <div style="flex:1;background:#fff;padding:12px 16px;min-width:90px">
+      <div style="font-size:9px;color:#8e8e93">${esc(r)}</div>
+      <div style="font-size:15px;font-weight:400;color:#000;margin-top:3px;font-variant-numeric:tabular-nums">${fmt(roomTot[r])}</div>
+    </div>` : '').join('');
+
+  const sections = rooms.map(room => {
+    const cards = grp[room].map(it => {
+      const sum = Number(it.price) * it.qty;
+      const imgBlock = it.img
+        ? `<div style="height:160px;background:#f0ede9;overflow:hidden;border-radius:4px 4px 0 0;display:flex;align-items:center;justify-content:center"><img src="${esc(it.img)}" style="width:100%;height:100%;object-fit:contain" onerror="this.parentNode.innerHTML='<div style=height:160px;display:flex;align-items:center;justify-content:center;font-size:28px;color:#C8C1BE>&#9633;</div>'"></div>`
+        : `<div style="height:160px;background:#f0ede9;border-radius:4px 4px 0 0;display:flex;align-items:center;justify-content:center;font-size:28px;color:#C8C1BE">&#9633;</div>`;
+      const nameEl = it.url
+        ? `<a href="${esc(it.url)}" target="_blank" style="color:#000;font-size:13px;font-weight:400;text-decoration:none;line-height:1.4">${esc(it.name)}</a>`
+        : `<div style="color:#000;font-size:13px;font-weight:400;line-height:1.4">${esc(it.name)}</div>`;
+      return `<div style="background:#fff;border:1px solid #ddd5d0;border-radius:4px;overflow:hidden;display:flex;flex-direction:column">
+        ${it.url ? `<a href="${esc(it.url)}" target="_blank" style="display:block;text-decoration:none">${imgBlock}</a>` : imgBlock}
+        <div style="padding:12px 14px;flex:1;display:flex;flex-direction:column;gap:4px">
+          ${nameEl}
+          ${it.size ? `<div style="color:#8e8e93;font-size:11px">${esc(it.size)}</div>` : ''}
+          ${it.cmt ? `<div style="color:#8e8e93;font-size:11px;font-style:italic">${esc(it.cmt)}</div>` : ''}
+          <div style="margin-top:auto;padding-top:10px;border-top:1px solid #f0ede9;display:flex;justify-content:space-between;align-items:baseline">
+            <div style="font-size:11px;color:#8e8e93;font-weight:300">${it.qty} шт × ${it.price ? Number(it.price).toLocaleString('ru-RU') + ' ₽' : '—'}</div>
+            <div style="font-size:14px;font-weight:500;color:#000;font-variant-numeric:tabular-nums">${it.price ? fmt(sum) : '—'}</div>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+    return `<section style="margin-bottom:40px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;padding-bottom:8px;border-bottom:0.5px solid #000;margin-bottom:14px">
+        <h2 style="font-size:20px;font-weight:500;color:#000">${esc(room)}</h2>
+        ${roomTot[room] ? `<div style="font-size:12px;color:#8e8e93">${fmt(roomTot[room])}</div>` : ''}
+      </div>
+      <div class="cards-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px">${cards}</div>
+    </section>`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(projectTitle)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#fdfcfb;color:#000;font-weight:300;font-size:14px;line-height:1.6}
+@media print{
+  .no-print{display:none!important}
+  .cards-grid{grid-template-columns:repeat(2,1fr)!important}
+  header{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
+  .sum-row{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}
+  @page{margin:12mm;size:auto;marks:none}
+}
+@media(max-width:600px){
+  .hdr-inner{flex-direction:column!important;align-items:flex-start!important;gap:12px!important}
+  .hdr-right{width:100%!important;display:flex!important;justify-content:space-between!important;align-items:flex-end!important}
+}
+</style>
+</head><body>
+<header style="background:#7B2237">
+  <div class="hdr-inner" style="max-width:1100px;margin:0 auto;padding:16px 24px;display:flex;align-items:center;justify-content:space-between;gap:20px">
+    <div style="display:flex;align-items:center;gap:14px">
+      ${project.designer_logo
+        ? `<img src="${project.designer_logo}" style="width:40px;height:40px;border-radius:6px;object-fit:cover;border:1px solid rgba(255,255,255,0.2);flex-shrink:0" alt="logo">`
+        : `<div style="width:40px;height:40px;background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.2);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;color:rgba(255,255,255,0.8);flex-shrink:0">ez</div>`}
+      <div>
+        <div style="font-size:14px;font-weight:500;color:#fff">${esc(project.designer_name)}</div>
+        <div style="font-size:10px;color:rgba(255,255,255,0.4);margin-top:2px">Дизайнер интерьеров</div>
+      </div>
+    </div>
+    <div class="hdr-right" style="display:flex;align-items:center;gap:14px">
+      <div style="text-align:right">
+        <div style="font-size:16px;font-weight:500;color:#fff">${esc(projectTitle)}</div>
+        <div style="font-size:10px;color:rgba(255,255,255,0.4);margin-top:2px">${date}</div>
+      </div>
+      <button onclick="doPrint()" class="no-print" style="background:none;color:#fff;border:1px solid rgba(255,255,255,0.55);border-radius:3px;padding:7px 14px;font-size:11px;cursor:pointer;font-family:inherit;white-space:nowrap">↓ PDF</button>
+    </div>
+  </div>
+</header>
+<div style="max-width:1100px;margin:0 auto;padding:28px 24px 64px">
+  <div class="sum-row" style="display:flex;gap:1px;background:#ddd5d0;border:1px solid #ddd5d0;border-radius:4px;overflow:hidden;margin-bottom:36px;flex-wrap:wrap">
+    ${summaryCards}
+    <div style="background:#7B2237;padding:12px 16px;min-width:90px;flex:0 0 auto">
+      <div style="font-size:9px;color:rgba(255,255,255,0.4)">Итого</div>
+      <div style="font-size:15px;font-weight:400;color:#fff;margin-top:3px;font-variant-numeric:tabular-nums">${fmt(grand)}</div>
+    </div>
+  </div>
+  ${sections}
+  ${comment ? `<div style="margin-bottom:20px;font-size:12px;color:#8e8e93">${esc(comment)}</div>` : ''}
+  <footer style="padding-top:20px;border-top:1px solid #ddd5d0">
+    <div style="font-size:11px;color:#8e8e93;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      ${project.designer_phone ? `<span>${esc(project.designer_phone)}</span>` : ''}
+      ${project.designer_phone && project.designer_email ? `<span>·</span>` : ''}
+      ${project.designer_email ? `<span>${esc(project.designer_email)}</span>` : ''}
+      ${project.designer_site ? `<span>·</span><a href="https://${esc(project.designer_site)}" target="_blank" style="color:#778D7F;text-decoration:none">${esc(project.designer_site)}</a>` : ''}
+    </div>
+  </footer>
+</div>
+<script>
+function doPrint(){
+  var t=document.title;
+  document.title='${esc(project.name).replace(/'/g,"\\'")} Комплектация';
+  var h=document.body.scrollHeight;
+  var style=document.createElement('style');
+  style.id='print-size-fix';
+  style.textContent='@page{size:794px '+h+'px;margin:24px}';
+  document.head.appendChild(style);
+  window.print();
+  setTimeout(function(){
+    document.title=t;
+    var el=document.getElementById('print-size-fix');
+    if(el)el.remove();
+  },1000);
+}
+if(new URLSearchParams(window.location.search).get('print')==='1'){
+  window.addEventListener('load',function(){setTimeout(doPrint,800)});
+}
+</script>
+</body></html>`;
+}
+
+// SPA fallback — всё кроме /api, /p/:slug, /admin, /invite/:token отдаём index.html
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api') || req.path.startsWith('/p/') || req.path.startsWith('/admin') || req.path.startsWith('/invite/')) return next();
+  res.sendFile(path.join(__dirname, '../public/index.html'));
+});
+
+initDB().then(() => {
+  app.listen(PORT, () => console.log(`ezhome-spec running on port ${PORT}`));
+}).catch(err => {
+  console.error('DB init error:', err);
+  process.exit(1);
+});
