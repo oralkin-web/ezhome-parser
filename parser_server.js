@@ -331,8 +331,19 @@ async function parsePage(url, debug = false) {
       }
 
       // ── ФОТО ──
-      let image_url = document.querySelector('meta[property="og:image"]')?.content ||
-        document.querySelector('meta[name="og:image"]')?.content || null;
+      // Сначала ищем фото товара из карусели (dantonehome и похожие Vue-сайты)
+      let image_url = null;
+      const carouselFirst = document.querySelector('img.image.cursor-zoom, img[class*="cursor-zoom"], img[class*="product-image"], img[class*="gallery__img"]');
+      if (carouselFirst) {
+        const src = carouselFirst.src || carouselFirst.currentSrc || carouselFirst.dataset.src;
+        if (src && src.startsWith('http') && !src.includes('logo') && !src.includes('placeholder') && !src.includes('noimage') && !src.includes('uploads/') ) {
+          image_url = src;
+        }
+      }
+      if (!image_url) {
+        image_url = document.querySelector('meta[property="og:image"]')?.content ||
+          document.querySelector('meta[name="og:image"]')?.content || null;
+      }
       if (image_url && (image_url.includes('.svg') || image_url.includes('favicon') || image_url.includes('logo') || image_url.includes('photo_image') || image_url.includes('no_photo') || image_url.includes('no-photo') || image_url.includes('noimage') || image_url.includes('placeholder'))) image_url = null;
 
       if (!image_url && jsonld?.image) {
